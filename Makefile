@@ -28,11 +28,26 @@ EVAL_INTERVAL = 1000
 LOG_INTERVAL = 100
 SAVE_INTERVAL = 5000
 
+# Tokenization settings
+MAX_SAMPLES = 100000
+
 # ========== Tokenization ==========
 
 # Pre-tokenize dataset (run this before training for faster startup)
 tokenize:
 	@echo "Pre-tokenizing dataset..."
+	$(PYTHON) $(TOKENIZE_SCRIPT) \
+		--dataset roneneldan/TinyStories \
+		--tokenizer $(TOKENIZER) \
+		--context_length $(CONTEXT_LENGTH) \
+		--output_dir $(TOKENIZED_DATA_DIR) \
+		--splits train validation \
+		--max_samples $(MAX_SAMPLES)
+	@echo "Tokenization complete! Cached in $(TOKENIZED_DATA_DIR)"
+
+# Tokenize full dataset (no limit)
+tokenize-full:
+	@echo "Pre-tokenizing FULL dataset (this may take a while)..."
 	$(PYTHON) $(TOKENIZE_SCRIPT) \
 		--dataset roneneldan/TinyStories \
 		--tokenizer $(TOKENIZER) \
@@ -62,7 +77,8 @@ train:
 		--eval_interval $(EVAL_INTERVAL) \
 		--log_interval $(LOG_INTERVAL) \
 		--save_interval $(SAVE_INTERVAL) \
-		--output_dir $(OUTPUT_DIR_ORIGINAL)
+		--output_dir $(OUTPUT_DIR_ORIGINAL) \
+		--max_samples $(MAX_SAMPLES)
 
 # Train mHC Transformer
 train-mhc:
@@ -83,7 +99,8 @@ train-mhc:
 		--eval_interval $(EVAL_INTERVAL) \
 		--log_interval $(LOG_INTERVAL) \
 		--save_interval $(SAVE_INTERVAL) \
-		--output_dir $(OUTPUT_DIR_MHC)
+		--output_dir $(OUTPUT_DIR_MHC) \
+		--max_samples $(MAX_SAMPLES)
 
 # Train both models for comparison
 train-all: train train-mhc
