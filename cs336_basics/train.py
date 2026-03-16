@@ -121,7 +121,7 @@ def load_and_prepare_hf_dataset(dataset_name, tokenizer, context_length, tokeniz
     Load and prepare HuggingFace dataset with caching support.
     If tokenized data already exists in the cache directory, load it directly.
     Otherwise, tokenize and save to cache for future use.
-    Uses streaming mode to avoid memory issues with large datasets.
+    Uses streaming mode with incremental disk writes to avoid memory issues.
     """
     # Create cache directory if it doesn't exist
     os.makedirs(tokenized_data_dir, exist_ok=True)
@@ -149,10 +149,11 @@ def load_and_prepare_hf_dataset(dataset_name, tokenizer, context_length, tokeniz
     dataset = load_dataset(dataset_name, split=split, streaming=True)
     logger.info(f"Loading dataset in streaming mode...")
 
-    # Tokenize with streaming
+    # Tokenize with streaming and incremental writes
     stride = context_length // 2
-    all_tokens = []
+    temp_path = cache_path + ".tmp"
     sample_count = 0
+    chunk_tokens = []
 
     logger.info(f"Tokenizing with context_length={context_length}, stride={stride}...")
     if max_samples:
@@ -175,23 +176,54 @@ def load_and_prepare_hf_dataset(dataset_name, tokenizer, context_length, tokeniz
 
         for ids in tokenized["input_ids"]:
             if len(ids) == context_length:
-                all_tokens.append(ids)
+                chunk_tokens.append(ids)
 
         sample_count += 1
         pbar.update(1)
 
+        # Write to disk periodically to save memory
+        if len(chunk_tokens) >= 100_000:
+            _append_tokens_to_file(temp_path, chunk_tokens)
+            chunk_tokens = []
+
     pbar.close()
+
+    # Write remaining tokens
+    if chunk_tokens:
+        _append_tokens_to_file(temp_path, chunk_tokens)
+
     logger.info(f"Processed {sample_count:,} samples")
 
-    # Convert data to numpy array for mmap
-    logger.info("Preparing memory-mapped data...")
-    tokens_array = np.array(all_tokens, dtype=np.uint16).flatten()
+    # Convert to final numpy format
+    logger.info("Converting to final format...")
+    _convert_to_npy(temp_path, cache_path)
 
-    # Save to cache directory
-    np.save(cache_path, tokens_array)
-    logger.info(f"Tokenized data cached to: {cache_path}, total tokens: {len(tokens_array)}")
+    # Clean up temp file
+    if os.path.exists(temp_path):
+        os.remove(temp_path)
+
+    final_tokens = os.path.getsize(cache_path) // 2  # uint16 = 2 bytes
+    logger.info(f"Tokenized data cached to: {cache_path}, total tokens: {final_tokens:,}")
 
     return cache_path
+
+
+def _append_tokens_to_file(filepath: str, tokens: list):
+    """Append tokens to a binary file."""
+    flat_tokens = []
+    for seq in tokens:
+        flat_tokens.extend(seq)
+    arr = np.array(flat_tokens, dtype=np.uint16)
+    with open(filepath, 'ab') as f:
+        f.write(arr.tobytes())
+
+
+def _convert_to_npy(temp_path: str, output_path: str):
+    """Convert raw binary file to numpy format."""
+    with open(temp_path, 'rb') as f:
+        data = f.read()
+    arr = np.frombuffer(data, dtype=np.uint16)
+    np.save(output_path, arr)
 
 def load_data_mmap(data_path):
     logger.info(f"Loading data: {data_path}")
