@@ -65,6 +65,8 @@ class RMSNorm(nn.Module):
         x_float = x.to(torch.float32)
         rms = torch.sqrt(x_float.pow(2).mean(dim=-1, keepdim=True) + eps)
         result = x_float / rms
+        # Clamp to prevent extreme values that cause NaN
+        result = torch.clamp(result, min=-10, max=10)
         return result.to(x.dtype)
 
 class SwiGLU(nn.Module):
@@ -397,12 +399,16 @@ class mHCTransformerBlock(nn.Module):
         H_res = rearrange(H_res, '(b s) n1 n2 -> b s n1 n2',
                          b=batch_size, s=seq_len, n1=self.n, n2=self.n)
 
+        # Normalize H_pre for proper weighted aggregation (sum to 1)
+        # This ensures the aggregated input has similar scale to the original
+        H_pre_normalized = H_pre / (H_pre.sum(dim=-1, keepdim=True) + 1e-6)
+
         # ==== 3. Apply H_pre to aggregate to C-dimensional input ====
         # Split x_stream into n groups, each C dimensions
         x_split = rearrange(x_stream, 'b s (n c) -> b s n c', n=self.n, c=C)
 
-        # Use H_pre weighted aggregation: x_attn_input (b, s, C)
-        x_attn_input = einsum(H_pre, x_split, 'b s n, b s n c -> b s c')
+        # Use H_pre_normalized weighted aggregation: x_attn_input (b, s, C)
+        x_attn_input = einsum(H_pre_normalized, x_split, 'b s n, b s n c -> b s c')
 
         # ==== 4. Pass through attention layer ====
         attn_output = self.self_attention(x_attn_input, token_positions)
@@ -412,8 +418,12 @@ class mHCTransformerBlock(nn.Module):
         # First expand attn_output to n copies, then weight with H_post
         attn_output_expanded = repeat(attn_output, 'b s c -> b s n c', n=self.n)
 
-        # Apply H_post as weights (H_post = 2*sigmoid(...), range [0,2])
-        attn_stream = attn_output_expanded * H_post.unsqueeze(-1)
+        # H_post = 2*sigmoid(...), range [0,2]
+        # Scale by 0.5 to get range [0,1] for stable residual connection
+        H_post_scaled = H_post * 0.5
+
+        # Apply H_post as weights
+        attn_stream = attn_output_expanded * H_post_scaled.unsqueeze(-1)
 
         # ==== 6. Apply H_res for intra-stream mixing ====
         # Reshape x_stream to (b, s, n, C) for matrix multiplication
@@ -426,18 +436,18 @@ class mHCTransformerBlock(nn.Module):
         x_stream_updated = x_stream_mixed + attn_stream
 
         # ==== 7. Pass through FFN ====
-        x_ffn_input = einsum(H_pre, x_stream_updated, 'b s n, b s n c -> b s c')
+        x_ffn_input = einsum(H_pre_normalized, x_stream_updated, 'b s n, b s n c -> b s c')
         ffn_output = self.ffn(x_ffn_input)
 
         # ==== 8. Apply H_post again to project back to stream ====
         ffn_output_expanded = repeat(ffn_output, 'b s c -> b s n c', n=self.n)
-        ffn_stream = ffn_output_expanded * H_post.unsqueeze(-1)
+        ffn_stream = ffn_output_expanded * H_post_scaled.unsqueeze(-1)
 
         # ==== 9. Final residual stream update ====
         x_stream_final = x_stream_updated + ffn_stream
 
         # ==== 10. Aggregate back to C-dimensional output ====
-        x_output = einsum(H_pre, x_stream_final, 'b s n, b s n c -> b s c')
+        x_output = einsum(H_pre_normalized, x_stream_final, 'b s n, b s n c -> b s c')
 
         # Apply dropout
         x_output = self.dropout(x_output)
