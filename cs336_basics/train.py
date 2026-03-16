@@ -165,7 +165,10 @@ def load_and_prepare_hf_dataset(dataset_name, tokenizer, context_length, tokeniz
     f = open(temp_path, 'wb')
 
     try:
-        pbar = tqdm(desc="Tokenizing", unit="samples")
+        # Show total if max_samples is set
+        total = max_samples if max_samples else None
+        pbar = tqdm(desc="Tokenizing", unit="samples", total=total,
+                    bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]')
 
         for sample in dataset:
             if max_samples and sample_count >= max_samples:
@@ -188,6 +191,10 @@ def load_and_prepare_hf_dataset(dataset_name, tokenizer, context_length, tokeniz
 
             sample_count += 1
             pbar.update(1)
+
+            # Update postfix info periodically
+            if sample_count % 100 == 0:
+                pbar.set_postfix({'seqs': f'{total_sequences:,}'})
 
         pbar.close()
 

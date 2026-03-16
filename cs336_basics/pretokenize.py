@@ -118,7 +118,10 @@ def tokenize_dataset(dataset_name: str, tokenizer, context_length: int,
 
     try:
         # Process one sample at a time to minimize memory
-        pbar = tqdm(desc="Tokenizing", unit="samples")
+        # Show total if max_samples is set
+        total = max_samples if max_samples else None
+        pbar = tqdm(desc="Tokenizing", unit="samples", total=total,
+                    bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]')
 
         for sample in dataset:
             if max_samples and sample_count >= max_samples:
@@ -143,9 +146,9 @@ def tokenize_dataset(dataset_name: str, tokenizer, context_length: int,
             sample_count += 1
             pbar.update(1)
 
-            # Log progress every 5000 samples
-            if sample_count % 5000 == 0:
-                pbar.set_postfix({'seqs': total_sequences})
+            # Update postfix info periodically
+            if sample_count % 100 == 0:
+                pbar.set_postfix({'seqs': f'{total_sequences:,}'})
 
         pbar.close()
 
