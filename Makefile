@@ -1,12 +1,14 @@
-.PHONY: train train-mhc train-all clean
+.PHONY: tokenize train train-mhc train-all clean clean-cache
 
 # Training script
 PYTHON = ./.venv/bin/python
 TRAIN_SCRIPT = ./cs336_basics/train.py
+TOKENIZE_SCRIPT = ./cs336_basics/tokenize.py
 
 # Output directories
 OUTPUT_DIR_ORIGINAL = ./checkpoints/original
 OUTPUT_DIR_MHC = ./checkpoints/mhc
+TOKENIZED_DATA_DIR = ./tokenized_data
 
 # Default target
 .DEFAULT_GOAL := train
@@ -25,6 +27,19 @@ WARMUP_ITERS = 2000
 EVAL_INTERVAL = 1000
 LOG_INTERVAL = 100
 SAVE_INTERVAL = 5000
+
+# ========== Tokenization ==========
+
+# Pre-tokenize dataset (run this before training for faster startup)
+tokenize:
+	@echo "Pre-tokenizing dataset..."
+	$(PYTHON) $(TOKENIZE_SCRIPT) \
+		--dataset roneneldan/TinyStories \
+		--tokenizer $(TOKENIZER) \
+		--context_length $(CONTEXT_LENGTH) \
+		--output_dir $(TOKENIZED_DATA_DIR) \
+		--splits train validation
+	@echo "Tokenization complete! Cached in $(TOKENIZED_DATA_DIR)"
 
 # ========== Training targets ==========
 
@@ -78,6 +93,7 @@ train-all: train train-mhc
 
 # ========== Cleanup ==========
 
+# Clean checkpoints
 clean:
 	@read -p "Are you sure you want to delete all checkpoints? [y/N] " -n 1 -r; \
 	echo ""; \
@@ -86,4 +102,15 @@ clean:
 		echo "Cleanup complete"; \
 	else \
 		echo "Cleanup cancelled"; \
+	fi
+
+# Clean tokenized data cache
+clean-cache:
+	@read -p "Are you sure you want to delete all tokenized data cache? [y/N] " -n 1 -r; \
+	echo ""; \
+	if [[ $$REPLY =~ ^[Yy]$$ ]]; then \
+		rm -rf $(TOKENIZED_DATA_DIR); \
+		echo "Cache cleanup complete"; \
+	else \
+		echo "Cache cleanup cancelled"; \
 	fi
