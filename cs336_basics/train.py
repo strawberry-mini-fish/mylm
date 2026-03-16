@@ -121,7 +121,7 @@ def load_and_prepare_hf_dataset(dataset_name, tokenizer, context_length, tokeniz
     Load and prepare HuggingFace dataset with caching support.
     If tokenized data already exists in the cache directory, load it directly.
     Otherwise, tokenize and save to cache for future use.
-    Uses streaming mode with incremental disk writes to avoid memory issues.
+    Uses streaming mode with immediate disk writes to avoid memory issues.
     """
     # Create cache directory if it doesn't exist
     os.makedirs(tokenized_data_dir, exist_ok=True)
@@ -149,48 +149,50 @@ def load_and_prepare_hf_dataset(dataset_name, tokenizer, context_length, tokeniz
     dataset = load_dataset(dataset_name, split=split, streaming=True)
     logger.info(f"Loading dataset in streaming mode...")
 
-    # Tokenize with streaming and incremental writes
+    # Tokenize with streaming and immediate writes
     stride = context_length // 2
     temp_path = cache_path + ".tmp"
     sample_count = 0
-    chunk_tokens = []
+    total_sequences = 0
 
     logger.info(f"Tokenizing with context_length={context_length}, stride={stride}...")
     if max_samples:
         logger.info(f"Processing max {max_samples:,} samples")
 
     from tqdm import tqdm
-    pbar = tqdm(desc="Tokenizing", unit="samples")
 
-    for sample in dataset:
-        if max_samples and sample_count >= max_samples:
-            break
+    # Open file for writing
+    f = open(temp_path, 'wb')
 
-        tokenized = tokenizer(
-            sample["text"],
-            truncation=True,
-            max_length=context_length,
-            return_overflowing_tokens=True,
-            stride=stride,
-        )
+    try:
+        pbar = tqdm(desc="Tokenizing", unit="samples")
 
-        for ids in tokenized["input_ids"]:
-            if len(ids) == context_length:
-                chunk_tokens.append(ids)
+        for sample in dataset:
+            if max_samples and sample_count >= max_samples:
+                break
 
-        sample_count += 1
-        pbar.update(1)
+            tokenized = tokenizer(
+                sample["text"],
+                truncation=True,
+                max_length=context_length,
+                return_overflowing_tokens=True,
+                stride=stride,
+            )
 
-        # Write to disk periodically to save memory
-        if len(chunk_tokens) >= 100_000:
-            _append_tokens_to_file(temp_path, chunk_tokens)
-            chunk_tokens = []
+            # Write each sequence immediately to disk
+            for ids in tokenized["input_ids"]:
+                if len(ids) == context_length:
+                    arr = np.array(ids, dtype=np.uint16)
+                    f.write(arr.tobytes())
+                    total_sequences += 1
 
-    pbar.close()
+            sample_count += 1
+            pbar.update(1)
 
-    # Write remaining tokens
-    if chunk_tokens:
-        _append_tokens_to_file(temp_path, chunk_tokens)
+        pbar.close()
+
+    finally:
+        f.close()
 
     logger.info(f"Processed {sample_count:,} samples")
 
@@ -206,16 +208,6 @@ def load_and_prepare_hf_dataset(dataset_name, tokenizer, context_length, tokeniz
     logger.info(f"Tokenized data cached to: {cache_path}, total tokens: {final_tokens:,}")
 
     return cache_path
-
-
-def _append_tokens_to_file(filepath: str, tokens: list):
-    """Append tokens to a binary file."""
-    flat_tokens = []
-    for seq in tokens:
-        flat_tokens.extend(seq)
-    arr = np.array(flat_tokens, dtype=np.uint16)
-    with open(filepath, 'ab') as f:
-        f.write(arr.tobytes())
 
 
 def _convert_to_npy(temp_path: str, output_path: str):

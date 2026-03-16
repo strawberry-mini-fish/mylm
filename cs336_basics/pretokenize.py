@@ -66,7 +66,7 @@ def tokenize_dataset(dataset_name: str, tokenizer, context_length: int,
                      batch_size: int = 1000) -> str:
     """
     Tokenize a dataset split and save to cache using memory-efficient streaming.
-    Writes to disk incrementally to avoid memory issues.
+    Writes to disk immediately after each sample to avoid memory issues.
 
     Args:
         dataset_name: Hugging Face dataset name
@@ -104,7 +104,6 @@ def tokenize_dataset(dataset_name: str, tokenizer, context_length: int,
     # Compute stride
     stride = int(context_length * stride_ratio)
 
-    # Process in batches and write incrementally to temp file
     logger.info(f"Tokenizing with context_length={context_length}, stride={stride}...")
     if max_samples:
         logger.info(f"Processing max {max_samples:,} samples")
@@ -112,48 +111,50 @@ def tokenize_dataset(dataset_name: str, tokenizer, context_length: int,
     # Use temp file for incremental writing
     temp_path = cache_path + ".tmp"
     sample_count = 0
-    total_tokens = 0
-    batch_texts = []
-    chunk_tokens = []
+    total_sequences = 0
 
-    # Use tqdm for progress tracking
-    pbar = tqdm(desc="Tokenizing", unit="samples")
+    # Open file for writing
+    f = open(temp_path, 'wb')
 
-    for sample in dataset:
-        if max_samples and sample_count >= max_samples:
-            break
+    try:
+        # Process one sample at a time to minimize memory
+        pbar = tqdm(desc="Tokenizing", unit="samples")
 
-        batch_texts.append(sample["text"])
-        sample_count += 1
-        pbar.update(1)
+        for sample in dataset:
+            if max_samples and sample_count >= max_samples:
+                break
 
-        # Process batch when full
-        if len(batch_texts) >= batch_size:
-            tokens = _tokenize_batch(batch_texts, tokenizer, context_length, stride)
-            chunk_tokens.extend(tokens)
-            batch_texts = []
+            # Tokenize single sample
+            tokenized = tokenizer(
+                sample["text"],
+                truncation=True,
+                max_length=context_length,
+                return_overflowing_tokens=True,
+                stride=stride,
+            )
 
-            # Write to disk when chunk is large enough (every 100K tokens)
-            if len(chunk_tokens) >= 100_000:
-                _append_tokens_to_file(temp_path, chunk_tokens)
-                total_tokens += len(chunk_tokens) * context_length
-                chunk_tokens = []
+            # Write each sequence immediately
+            for ids in tokenized["input_ids"]:
+                if len(ids) == context_length:
+                    arr = np.array(ids, dtype=np.uint16)
+                    f.write(arr.tobytes())
+                    total_sequences += 1
 
-    # Process remaining batch
-    if batch_texts:
-        tokens = _tokenize_batch(batch_texts, tokenizer, context_length, stride)
-        chunk_tokens.extend(tokens)
+            sample_count += 1
+            pbar.update(1)
 
-    # Write remaining tokens
-    if chunk_tokens:
-        _append_tokens_to_file(temp_path, chunk_tokens)
-        total_tokens += len(chunk_tokens) * context_length
+            # Log progress every 5000 samples
+            if sample_count % 5000 == 0:
+                pbar.set_postfix({'seqs': total_sequences})
 
-    pbar.close()
+        pbar.close()
+
+    finally:
+        f.close()
 
     # Convert temp file to final numpy format
     logger.info("Converting to final format...")
-    _convert_to_npy(temp_path, cache_path, context_length)
+    _convert_to_npy(temp_path, cache_path)
 
     # Clean up temp file
     if os.path.exists(temp_path):
@@ -163,33 +164,16 @@ def tokenize_dataset(dataset_name: str, tokenizer, context_length: int,
     final_tokens = os.path.getsize(cache_path) // 2  # uint16 = 2 bytes
     logger.info(f"Tokenized data saved to: {cache_path}")
     logger.info(f"Total tokens: {final_tokens:,}")
+    logger.info(f"Total sequences: {total_sequences:,}")
 
     return cache_path
 
 
-def _append_tokens_to_file(filepath: str, tokens: list):
-    """Append tokens to a binary file."""
-    # Flatten and convert to uint16
-    flat_tokens = []
-    for seq in tokens:
-        flat_tokens.extend(seq)
-    arr = np.array(flat_tokens, dtype=np.uint16)
-
-    # Append to file
-    with open(filepath, 'ab') as f:
-        f.write(arr.tobytes())
-
-
-def _convert_to_npy(temp_path: str, output_path: str, context_length: int):
+def _convert_to_npy(temp_path: str, output_path: str):
     """Convert raw binary file to numpy format."""
-    # Read raw bytes
     with open(temp_path, 'rb') as f:
         data = f.read()
-
-    # Convert to numpy array
     arr = np.frombuffer(data, dtype=np.uint16)
-
-    # Save as numpy file
     np.save(output_path, arr)
 
 
