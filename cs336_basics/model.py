@@ -105,9 +105,17 @@ class RotaryPositionalEmbedding(nn.Module):
         sin=self.sin_cache[token_positions]
         x_even=x[...,0::2]
         x_odd=x[...,1::2]
-        
+
         cos_pair=cos[...,0::2]
         sin_pair=sin[...,0::2]
+
+        # Add extra dimension for broadcasting with multi-head attention
+        # x has shape (batch, num_heads, seq_len, d_k/2)
+        # cos_pair/sin_pair have shape (batch, seq_len, d_k/2)
+        # Need to unsqueeze to (batch, 1, seq_len, d_k/2) for broadcasting
+        while cos_pair.dim() < x_even.dim():
+            cos_pair = cos_pair.unsqueeze(1)
+            sin_pair = sin_pair.unsqueeze(1)
 
         x_rotated_even = x_even * cos_pair - x_odd * sin_pair
         x_rotated_odd = x_even * sin_pair + x_odd * cos_pair
