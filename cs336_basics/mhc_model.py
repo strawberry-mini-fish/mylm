@@ -61,10 +61,13 @@ class RMSNorm(nn.Module):
     @staticmethod
     def apply(x: torch.Tensor, dim: int):
         """Static method for RMSNorm in mHC"""
-        eps = 1e-5
+        eps = 1e-6
         x_float = x.to(torch.float32)
         rms = torch.sqrt(x_float.pow(2).mean(dim=-1, keepdim=True) + eps)
-        return (x_float / rms).to(x.dtype)
+        result = x_float / rms
+        # Clamp to prevent extreme values
+        result = torch.clamp(result, min=-10, max=10)
+        return result.to(x.dtype)
 
 class SwiGLU(nn.Module):
     def __init__(self, d_model, d_ff=None, device=None, dtype=None):
@@ -396,13 +399,15 @@ class mHCTransformerBlock(nn.Module):
         H_res = rearrange(H_res, '(b s) n1 n2 -> b s n1 n2',
                          b=batch_size, s=seq_len, n1=self.n, n2=self.n)
 
+        # Normalize H_pre to sum to 1 for stable aggregation (softmax)
+        H_pre_normalized = H_pre / (H_pre.sum(dim=-1, keepdim=True) + 1e-6)
+
         # ==== 3. Apply H_pre to aggregate to C-dimensional input ====
         # Split x_stream into n groups, each C dimensions
         x_split = rearrange(x_stream, 'b s (n c) -> b s n c', n=self.n, c=C)
 
-        # Use H_pre weighted aggregation: x_attn_input (b, s, C)
-        # H_pre: (b, s, n) as weights
-        x_attn_input = einsum(H_pre, x_split, 'b s n, b s n c -> b s c')
+        # Use H_pre_normalized weighted aggregation: x_attn_input (b, s, C)
+        x_attn_input = einsum(H_pre_normalized, x_split, 'b s n, b s n c -> b s c')
 
         # ==== 4. Pass through attention layer ====
         attn_output = self.self_attention(x_attn_input, token_positions)
@@ -412,40 +417,35 @@ class mHCTransformerBlock(nn.Module):
         # First expand attn_output to n copies, then weight with H_post
         attn_output_expanded = repeat(attn_output, 'b s c -> b s n c', n=self.n)
 
+        # Scale H_post for residual connection (scale down to prevent explosion)
+        H_post_scaled = H_post / self.n
+
         # Apply H_post as weights
-        # H_post: (b, s, n) -> (b, s, n, 1)
-        attn_stream = attn_output_expanded * H_post.unsqueeze(-1)
+        attn_stream = attn_output_expanded * H_post_scaled.unsqueeze(-1)
 
         # ==== 6. Apply H_res for intra-stream mixing ====
-        # x_stream_current = H_res @ x_stream_prev + attn_stream
-        # Here x_stream is the residual stream from previous layer
-
         # Reshape x_stream to (b, s, n, C) for matrix multiplication
         x_stream_reshaped = rearrange(x_stream, 'b s (n c) -> b s n c', n=self.n, c=C)
 
         # H_res: (b, s, n, n) mixes n streams
-        # For each position and batch, do n x n matrix times n x C
         x_stream_mixed = einsum(H_res, x_stream_reshaped, 'b s n1 n2, b s n2 c -> b s n1 c')
 
-        # Add projected attention output
+        # Add projected attention output (with residual connection)
         x_stream_updated = x_stream_mixed + attn_stream
 
-        # ==== 7. Pass through FFN (need to aggregate back to C dimensions first) ====
-        # Aggregate updated stream again to get FFN input
-        x_ffn_input = einsum(H_pre, x_stream_updated, 'b s n, b s n c -> b s c')
-
+        # ==== 7. Pass through FFN ====
+        x_ffn_input = einsum(H_pre_normalized, x_stream_updated, 'b s n, b s n c -> b s c')
         ffn_output = self.ffn(x_ffn_input)
 
         # ==== 8. Apply H_post again to project back to stream ====
         ffn_output_expanded = repeat(ffn_output, 'b s c -> b s n c', n=self.n)
-        ffn_stream = ffn_output_expanded * H_post.unsqueeze(-1)
+        ffn_stream = ffn_output_expanded * H_post_scaled.unsqueeze(-1)
 
         # ==== 9. Final residual stream update ====
         x_stream_final = x_stream_updated + ffn_stream
 
         # ==== 10. Aggregate back to C-dimensional output ====
-        # Final output is H_pre weighted sum of streams
-        x_output = einsum(H_pre, x_stream_final, 'b s n, b s n c -> b s c')
+        x_output = einsum(H_pre_normalized, x_stream_final, 'b s n, b s n c -> b s c')
 
         # Apply dropout
         x_output = self.dropout(x_output)
