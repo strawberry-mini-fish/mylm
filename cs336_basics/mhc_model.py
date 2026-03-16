@@ -419,8 +419,8 @@ class mHCTransformerBlock(nn.Module):
         attn_output_expanded = repeat(attn_output, 'b s c -> b s n c', n=self.n)
 
         # H_post = 2*sigmoid(...), range [0,2]
-        # Scale by 0.5 to get range [0,1] for stable residual connection
-        H_post_scaled = H_post * 0.5
+        # Scale by 0.75 for balanced residual connection strength
+        H_post_scaled = H_post * 0.75
 
         # Apply H_post as weights
         attn_stream = attn_output_expanded * H_post_scaled.unsqueeze(-1)
