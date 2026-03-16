@@ -218,14 +218,18 @@ def sinkhorn_knopp(M: torch.Tensor, num_iter: int = 20) -> torch.Tensor:
     num_iter: number of iterations
     Returns: doubly stochastic matrix
     """
+    # Clamp M to prevent overflow in exp
+    M_clamped = torch.clamp(M, min=-10, max=10)
     # Ensure all elements are positive
-    M_pos = torch.exp(M)  # Paper uses exp first
+    M_pos = torch.exp(M_clamped)  # Paper uses exp first
     # Alternating row and column normalization
     for _ in range(num_iter):
         # Row normalization
-        M_pos = M_pos / (M_pos.sum(dim=-1, keepdim=True) + 1e-8)
+        row_sum = M_pos.sum(dim=-1, keepdim=True)
+        M_pos = M_pos / (row_sum + 1e-6)
         # Column normalization
-        M_pos = M_pos / (M_pos.sum(dim=-2, keepdim=True) + 1e-8)
+        col_sum = M_pos.sum(dim=-2, keepdim=True)
+        M_pos = M_pos / (col_sum + 1e-6)
     return M_pos
 
 class ManifoldHyperConnection(nn.Module):
@@ -272,7 +276,8 @@ class ManifoldHyperConnection(nn.Module):
         self._init_weights()
         
     def _init_weights(self):
-        std = math.sqrt(2 / (self.stream_dim + self.n))
+        # Use smaller std for numerical stability
+        std = 0.02
         nn.init.trunc_normal_(self.phi_pre, std=std, a=-3*std, b=3*std)
         nn.init.trunc_normal_(self.phi_post, std=std, a=-3*std, b=3*std)
         nn.init.trunc_normal_(self.phi_res, std=std, a=-3*std, b=3*std)

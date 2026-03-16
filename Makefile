@@ -94,13 +94,14 @@ train-mhc:
 		--batch_size $(BATCH_SIZE) \
 		--context_length $(CONTEXT_LENGTH) \
 		--max_iters $(MAX_ITERS) \
-		--learning_rate $(LEARNING_RATE) \
+		--learning_rate 1e-4 \
 		--warmup_iters $(WARMUP_ITERS) \
 		--eval_interval $(EVAL_INTERVAL) \
 		--log_interval $(LOG_INTERVAL) \
 		--save_interval $(SAVE_INTERVAL) \
 		--output_dir $(OUTPUT_DIR_MHC) \
-		--max_samples $(MAX_SAMPLES)
+		--max_samples $(MAX_SAMPLES) \
+		--grad_clip 5.0
 
 # Train both models for comparison
 train-all: train train-mhc
