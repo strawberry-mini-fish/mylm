@@ -111,14 +111,17 @@ def parse_args():
                         help="Tokenizer name (from Hugging Face)")
     parser.add_argument("--tokenized_data_dir", type=str, default="tokenized_data",
                         help="Directory to cache tokenized data")
+    parser.add_argument("--max_samples", type=int, default=None,
+                        help="Maximum number of samples to process for tokenization (default: all)")
 
     return parser.parse_args()
 
-def load_and_prepare_hf_dataset(dataset_name, tokenizer, context_length, tokenized_data_dir, split="train"):
+def load_and_prepare_hf_dataset(dataset_name, tokenizer, context_length, tokenized_data_dir, split="train", max_samples=None):
     """
     Load and prepare HuggingFace dataset with caching support.
     If tokenized data already exists in the cache directory, load it directly.
     Otherwise, tokenize and save to cache for future use.
+    Uses streaming mode to avoid memory issues with large datasets.
     """
     # Create cache directory if it doesn't exist
     os.makedirs(tokenized_data_dir, exist_ok=True)
@@ -127,6 +130,8 @@ def load_and_prepare_hf_dataset(dataset_name, tokenizer, context_length, tokeniz
     # Use a hash to handle special characters in dataset names
     import hashlib
     cache_key = f"{dataset_name}_{tokenizer.name_or_path}_{context_length}_{split}"
+    if max_samples is not None:
+        cache_key += f"_max{max_samples}"
     cache_hash = hashlib.md5(cache_key.encode()).hexdigest()[:8]
     cache_filename = f"tokens_{split}_{cache_hash}.npy"
     cache_path = os.path.join(tokenized_data_dir, cache_filename)
@@ -140,44 +145,46 @@ def load_and_prepare_hf_dataset(dataset_name, tokenizer, context_length, tokeniz
     # No cached data, need to tokenize
     logger.info(f"No cached data found. Loading Hugging Face dataset: {dataset_name} - {split} split")
 
-    # Load dataset
-    dataset = load_dataset(dataset_name, split=split)
-    logger.info(f"Dataset size: {len(dataset)} samples")
+    # Load dataset with streaming mode to avoid memory issues
+    dataset = load_dataset(dataset_name, split=split, streaming=True)
+    logger.info(f"Loading dataset in streaming mode...")
 
-    # Define tokenization function
-    def tokenize_function(examples):
-        # Tokenize text
+    # Tokenize with streaming
+    stride = context_length // 2
+    all_tokens = []
+    sample_count = 0
+
+    logger.info(f"Tokenizing with context_length={context_length}, stride={stride}...")
+    if max_samples:
+        logger.info(f"Processing max {max_samples:,} samples")
+
+    from tqdm import tqdm
+    pbar = tqdm(desc="Tokenizing", unit="samples")
+
+    for sample in dataset:
+        if max_samples and sample_count >= max_samples:
+            break
+
         tokenized = tokenizer(
-            examples["text"],
+            sample["text"],
             truncation=True,
             max_length=context_length,
             return_overflowing_tokens=True,
-            stride=context_length // 2,  # Add overlap to increase data
+            stride=stride,
         )
 
-        # Process overflowing tokens to generate multiple sequences
-        input_ids_list = []
         for ids in tokenized["input_ids"]:
-            if len(ids) == context_length:  # Only keep complete sequences
-                input_ids_list.append(ids)
+            if len(ids) == context_length:
+                all_tokens.append(ids)
 
-        return {"input_ids": input_ids_list}
+        sample_count += 1
+        pbar.update(1)
 
-    # Tokenize dataset
-    logger.info("Tokenizing...")
-    tokenized_dataset = dataset.map(
-        tokenize_function,
-        batched=True,
-        remove_columns=dataset.column_names,
-        desc="Tokenizing",
-    )
+    pbar.close()
+    logger.info(f"Processed {sample_count:,} samples")
 
     # Convert data to numpy array for mmap
     logger.info("Preparing memory-mapped data...")
-    all_tokens = []
-    for item in tokenized_dataset:
-        all_tokens.extend(item["input_ids"])
-
     tokens_array = np.array(all_tokens, dtype=np.uint16).flatten()
 
     # Save to cache directory
@@ -299,7 +306,8 @@ def main():
         tokenizer,
         args.context_length,
         args.tokenized_data_dir,
-        split="train"
+        split="train",
+        max_samples=args.max_samples
     )
     train_data = load_data_mmap(train_data_path)
 
@@ -313,7 +321,8 @@ def main():
                 tokenizer,
                 args.context_length,
                 args.tokenized_data_dir,
-                split="validation"
+                split="validation",
+                max_samples=None  # Don't limit validation samples
             )
             val_data = load_data_mmap(val_data_path)
         except Exception as e:
