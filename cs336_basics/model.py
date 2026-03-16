@@ -269,11 +269,18 @@ class TransformerLM(nn.Module):
         )
         
     def forward(
-        self, 
-        input_ids: torch.Tensor,           
-        token_positions: Optional[torch.Tensor] = None  
-    ) -> torch.Tensor: 
+        self,
+        input_ids: torch.Tensor,
+        token_positions: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
         x=self.token_embedding(input_ids)
+
+        # Generate default token positions if not provided
+        if token_positions is None:
+            batch_size, seq_len = input_ids.shape
+            token_positions = torch.arange(seq_len, device=input_ids.device)
+            token_positions = token_positions.unsqueeze(0).expand(batch_size, -1)
+
         for block in self.blocks:
             x = block(x, token_positions)
         x = self.ln_final(x)
