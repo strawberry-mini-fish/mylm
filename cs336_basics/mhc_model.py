@@ -5,7 +5,7 @@ from einops import einsum, reduce, rearrange, repeat
 import torch.nn.functional as F
 from typing import Optional
 
-# ========== 基础组件（复用您的实现）==========
+# ========== Basic components (reused from model.py) ==========
 class Linear(nn.Module):
     def __init__(self, in_features, out_features, device=None, dtype=None):
         super().__init__()
@@ -39,28 +39,28 @@ class RMSNorm(nn.Module):
         self.weight = nn.Parameter(torch.ones(d_model, device=device, dtype=dtype))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x 可以是 (..., d_model) 或 (..., n*d_model)
+        # x can be (..., d_model) or (..., n*d_model)
         in_dtype = x.dtype
         x = x.to(torch.float32)
-        
-        # 计算最后一维的 RMS
+
+        # Compute RMS of the last dimension
         rms = torch.sqrt(x.pow(2).mean(dim=-1, keepdim=True) + self.eps)
         x_norm = x / rms
-        
-        # 确保 weight 的维度匹配
+
+        # Ensure weight dimension matches
         if x_norm.shape[-1] == self.d_model:
             output = x_norm * self.weight
         else:
-            # 对于展平后的输入，需要重复 weight
+            # For flattened input, repeat weight
             n = x_norm.shape[-1] // self.d_model
             weight_expanded = self.weight.unsqueeze(0).repeat(1, n)  # (1, n*d_model)
             output = x_norm * weight_expanded
-            
+
         return output.to(in_dtype)
-    
+
     @staticmethod
     def apply(x: torch.Tensor, dim: int):
-        """静态方法，用于 mHC 中的 RMSNorm"""
+        """Static method for RMSNorm in mHC"""
         eps = 1e-5
         x_float = x.to(torch.float32)
         rms = torch.sqrt(x_float.pow(2).mean(dim=-1, keepdim=True) + eps)
@@ -76,7 +76,7 @@ class SwiGLU(nn.Module):
         else:
             self.d_ff = d_ff
         
-        print(f"d_model={d_model}, d_ff={self.d_ff} (理论值={int(8/3*d_model)})")
+        print(f"d_model={d_model}, d_ff={self.d_ff} (theoretical={int(8/3*d_model)})")
 
         self.W1 = Linear(d_model, self.d_ff, device=device, dtype=dtype)
         self.W3 = Linear(d_model, self.d_ff, device=device, dtype=dtype)
@@ -84,17 +84,17 @@ class SwiGLU(nn.Module):
         
     def forward(self, x):
         input_shape = x.shape
-        act = self.W1(x)        # 激活路径
-        act = F.silu(act)        # 激活
-    
-        gate = self.W3(x)        # 门控路径（不激活）
-    
-        gated = act * gate       # GLU 相乘
-    
-        output = self.W2(gated)  # 输出投影
-    
+        act = self.W1(x)        # activation path
+        act = F.silu(act)        # activation
+
+        gate = self.W3(x)        # gate path (no activation)
+
+        gated = act * gate       # GLU multiplication
+
+        output = self.W2(gated)  # output projection
+
         assert output.shape == input_shape, \
-            f"输出形状{output.shape}应与输入形状{input_shape}相同"
+            f"output shape {output.shape} should match input shape {input_shape}"
         return output
     
     def extra_repr(self):
@@ -106,7 +106,7 @@ class RotaryPositionalEmbedding(nn.Module):
         self.theta = theta
         self.d_k = d_k
         self.max_seq_len = max_seq_len
-        assert d_k % 2 == 0, "d_k必须是偶数才能旋转"
+        assert d_k % 2 == 0, "d_k must be even for rotation"
         self._build_cache(device)
         
     def _build_cache(self, device):
@@ -202,65 +202,65 @@ class CasualMultiheadSelfAttention(nn.Module):
         return self.linearO(attention)
 
 
-# ========== mHC 核心组件 ==========
+# ========== mHC Core Components ==========
 def sinkhorn_knopp(M: torch.Tensor, num_iter: int = 20) -> torch.Tensor:
     """
-    将矩阵投影到双随机矩阵流形上
-    M: 输入矩阵，形状为 (..., n, n)
-    num_iter: 迭代次数
-    返回：双随机矩阵
+    Project matrix onto doubly stochastic matrix manifold
+    M: input matrix, shape (..., n, n)
+    num_iter: number of iterations
+    Returns: doubly stochastic matrix
     """
-    # 确保所有元素为正
-    M_pos = torch.exp(M)  # 论文中先取指数
-    # 交替行归一化和列归一化
+    # Ensure all elements are positive
+    M_pos = torch.exp(M)  # Paper uses exp first
+    # Alternating row and column normalization
     for _ in range(num_iter):
-        # 行归一化
+        # Row normalization
         M_pos = M_pos / (M_pos.sum(dim=-1, keepdim=True) + 1e-8)
-        # 列归一化
+        # Column normalization
         M_pos = M_pos / (M_pos.sum(dim=-2, keepdim=True) + 1e-8)
     return M_pos
 
 class ManifoldHyperConnection(nn.Module):
     """
     mHC: Manifold-Constrained Hyper-Connections
-    将残差流从 C 维扩展到 n*C 维，并施加流形约束
+    Expands residual stream from C dimensions to n*C dimensions with manifold constraints
     """
     def __init__(
         self,
-        d_model: int,           # 原始维度 C
-        expansion_rate: int,     # 扩展率 n (论文中 n=4)
+        d_model: int,           # Original dimension C
+        expansion_rate: int,     # Expansion rate n (n=4 in paper)
         device=None,
         dtype=None
     ):
         super().__init__()
         self.d_model = d_model
         self.n = expansion_rate
-        self.stream_dim = self.n * d_model  # 残差流维度 n*C
-        
-        # 论文公式(7)中的线性投影
-        # φ_pre, φ_post: R^{nC × n}
+        self.stream_dim = self.n * d_model  # Residual stream dimension n*C
+
+        # Linear projection in paper formula (7)
+        # phi_pre, phi_post: R^{nC x n}
         self.phi_pre = nn.Parameter(
             torch.empty((self.stream_dim, self.n), device=device, dtype=dtype)
         )
         self.phi_post = nn.Parameter(
             torch.empty((self.stream_dim, self.n), device=device, dtype=dtype)
         )
-        # φ_res: R^{nC × n^2}
+        # phi_res: R^{nC x n^2}
         self.phi_res = nn.Parameter(
             torch.empty((self.stream_dim, self.n * self.n), device=device, dtype=dtype)
         )
-        
-        # 可学习的门控因子 α (标量)
+
+        # Learnable gating factors alpha (scalar)
         self.alpha_pre = nn.Parameter(torch.tensor(0.01, device=device, dtype=dtype))
         self.alpha_post = nn.Parameter(torch.tensor(0.01, device=device, dtype=dtype))
         self.alpha_res = nn.Parameter(torch.tensor(0.01, device=device, dtype=dtype))
-        
-        # 可学习的偏置 b
+
+        # Learnable biases b
         self.b_pre = nn.Parameter(torch.zeros((1, self.n), device=device, dtype=dtype))
         self.b_post = nn.Parameter(torch.zeros((1, self.n), device=device, dtype=dtype))
         self.b_res = nn.Parameter(torch.zeros((self.n, self.n), device=device, dtype=dtype))
-        
-        # 初始化 phi 矩阵
+
+        # Initialize phi matrices
         self._init_weights()
         
     def _init_weights(self):
@@ -271,44 +271,44 @@ class ManifoldHyperConnection(nn.Module):
         
     def forward(self, x: torch.Tensor) -> tuple:
         """
-        x: 输入，形状 (..., n*C) - 展平后的残差流
-        返回: (H_pre, H_post, H_res) - 三个约束后的映射
+        x: input, shape (..., n*C) - flattened residual stream
+        Returns: (H_pre, H_post, H_res) - three constrained mappings
         """
-        # x 已经是展平后的向量，形状 (..., n*C)
-        
-        # 论文公式(7)中的 RMSNorm
-        # 注意：RMSNorm 作用在最后一维
+        # x is already flattened vector, shape (..., n*C)
+
+        # RMSNorm in paper formula (7)
+        # Note: RMSNorm operates on the last dimension
         x_norm = RMSNorm.apply(x, self.stream_dim)
-        
-        # 论文公式(7): 计算原始映射
-        # H_pre_tilde = α_pre * (x_norm @ φ_pre) + b_pre
+
+        # Paper formula (7): compute raw mappings
+        # H_pre_tilde = alpha_pre * (x_norm @ phi_pre) + b_pre
         H_pre_tilde = self.alpha_pre * (x_norm @ self.phi_pre) + self.b_pre  # (..., n)
-        
-        # H_post_tilde = α_post * (x_norm @ φ_post) + b_post
+
+        # H_post_tilde = alpha_post * (x_norm @ phi_post) + b_post
         H_post_tilde = self.alpha_post * (x_norm @ self.phi_post) + self.b_post  # (..., n)
-        
-        # H_res_tilde = α_res * (x_norm @ φ_res) 重塑 + b_res
+
+        # H_res_tilde = alpha_res * (x_norm @ phi_res) reshaped + b_res
         H_res_tilde_flat = self.alpha_res * (x_norm @ self.phi_res)  # (..., n^2)
         H_res_tilde = rearrange(H_res_tilde_flat, '... (n n2) -> ... n n2', n=self.n, n2=self.n)  # (..., n, n)
         H_res_tilde = H_res_tilde + self.b_res
-        
-        # 论文公式(8): 应用约束
+
+        # Paper formula (8): apply constraints
         # H_pre = sigmoid(H_pre_tilde)
-        H_pre = torch.sigmoid(H_pre_tilde)  # 非负约束
-        
+        H_pre = torch.sigmoid(H_pre_tilde)  # non-negative constraint
+
         # H_post = 2 * sigmoid(H_post_tilde)
-        H_post = 2 * torch.sigmoid(H_post_tilde)  # 非负约束，且范围 [0,2]
-        
+        H_post = 2 * torch.sigmoid(H_post_tilde)  # non-negative constraint, range [0,2]
+
         # H_res = Sinkhorn-Knopp(H_res_tilde)
-        H_res = sinkhorn_knopp(H_res_tilde)  # 双随机矩阵约束
-        
+        H_res = sinkhorn_knopp(H_res_tilde)  # doubly stochastic matrix constraint
+
         return H_pre, H_post, H_res
 
 
 class mHCTransformerBlock(nn.Module):
     """
-    基于 mHC 的 Transformer Block
-    将残差流从 C 维扩展到 n*C 维
+    mHC-based Transformer Block
+    Expands residual stream from C dimensions to n*C dimensions
     """
     def __init__(
         self,
@@ -316,29 +316,29 @@ class mHCTransformerBlock(nn.Module):
         num_heads: int,
         d_ff: int,
         max_seq_len: int,
-        expansion_rate: int = 4,  # 论文中的 n
+        expansion_rate: int = 4,  # n from paper
         theta: float = 10000.0,
         dropout: float = 0.1,
         device: Optional[torch.device] = None,
         dtype: Optional[torch.dtype] = None
     ):
         super().__init__()
-        
+
         self.d_model = d_model
         self.num_heads = num_heads
         self.d_ff = d_ff
         self.n = expansion_rate
         self.stream_dim = self.n * d_model
-        
-        # mHC 的核心模块
+
+        # mHC core module
         self.mhc = ManifoldHyperConnection(
             d_model=d_model,
             expansion_rate=expansion_rate,
             device=device,
             dtype=dtype
         )
-        
-        # 注意：注意力层和FFN的输入维度还是 d_model，不是 stream_dim
+
+        # Note: attention and FFN input dimension is still d_model, not stream_dim
         self.self_attention = CasualMultiheadSelfAttention(
             d_model=d_model,
             num_heads=num_heads,
@@ -347,102 +347,102 @@ class mHCTransformerBlock(nn.Module):
             device=device,
             dtype=dtype
         )
-        
+
         self.ffn = SwiGLU(
             d_model=d_model,
             d_ff=d_ff,
             device=device,
             dtype=dtype
         )
-        
-        # 可选的 dropout
+
+        # Optional dropout
         self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
         
     def forward(self, x: torch.Tensor, token_positions: torch.Tensor) -> torch.Tensor:
         """
-        x: 输入，形状 (batch_size, seq_len, C) - 原始维度
-        返回: 输出，形状 (batch_size, seq_len, C)
+        x: input, shape (batch_size, seq_len, C) - original dimension
+        Returns: output, shape (batch_size, seq_len, C)
         """
         batch_size, seq_len, C = x.shape
-        assert C == self.d_model, f"输入维度 {C} 应与 d_model {self.d_model} 匹配"
-        
-        # ==== 1. 将输入扩展到 n*C 维的残差流 ====
-        # 通过重复扩展：x_stream (batch, seq_len, n*C)
+        assert C == self.d_model, f"Input dimension {C} should match d_model {self.d_model}"
+
+        # ==== 1. Expand input to n*C dimensional residual stream ====
+        # Expand by repetition: x_stream (batch, seq_len, n*C)
         x_stream = repeat(x, 'b s c -> b s (n c)', n=self.n)
-        
-        # ==== 2. 展平以计算映射系数 ====
-        # 为了计算 H_pre, H_post, H_res，需要将 batch 和 seq_len 合并
+
+        # ==== 2. Flatten to compute mapping coefficients ====
+        # To compute H_pre, H_post, H_res, merge batch and seq_len
         x_flat = rearrange(x_stream, 'b s d -> (b s) d')  # (b*s, n*C)
-        
-        # 计算三个映射
-        H_pre, H_post, H_res = self.mhc(x_flat)  # 每个形状: (b*s, n) 或 (b*s, n, n)
-        
-        # 恢复 batch 和 seq_len 维度
+
+        # Compute three mappings
+        H_pre, H_post, H_res = self.mhc(x_flat)  # Each shape: (b*s, n) or (b*s, n, n)
+
+        # Restore batch and seq_len dimensions
         H_pre = rearrange(H_pre, '(b s) n -> b s n', b=batch_size, s=seq_len)
         H_post = rearrange(H_post, '(b s) n -> b s n', b=batch_size, s=seq_len)
-        H_res = rearrange(H_res, '(b s) n1 n2 -> b s n1 n2', 
+        H_res = rearrange(H_res, '(b s) n1 n2 -> b s n1 n2',
                          b=batch_size, s=seq_len, n1=self.n, n2=self.n)
-        
-        # ==== 3. 应用 H_pre 聚合到 C 维输入 ====
-        # 将 x_stream 分成 n 组，每组 C 维
+
+        # ==== 3. Apply H_pre to aggregate to C-dimensional input ====
+        # Split x_stream into n groups, each C dimensions
         x_split = rearrange(x_stream, 'b s (n c) -> b s n c', n=self.n, c=C)
-        
-        # 使用 H_pre 加权聚合: x_attn_input (b, s, C)
-        # H_pre: (b, s, n) 作为权重
+
+        # Use H_pre weighted aggregation: x_attn_input (b, s, C)
+        # H_pre: (b, s, n) as weights
         x_attn_input = einsum(H_pre, x_split, 'b s n, b s n c -> b s c')
-        
-        # ==== 4. 通过注意力层 ====
+
+        # ==== 4. Pass through attention layer ====
         attn_output = self.self_attention(x_attn_input, token_positions)
         # attn_output: (b, s, C)
-        
-        # ==== 5. 应用 H_post 将注意力输出投影回流 ====
-        # 首先将 attn_output 扩展为 n 个副本，然后用 H_post 加权
+
+        # ==== 5. Apply H_post to project attention output back to stream ====
+        # First expand attn_output to n copies, then weight with H_post
         attn_output_expanded = repeat(attn_output, 'b s c -> b s n c', n=self.n)
-        
-        # 应用 H_post 作为权重
+
+        # Apply H_post as weights
         # H_post: (b, s, n) -> (b, s, n, 1)
         attn_stream = attn_output_expanded * H_post.unsqueeze(-1)
-        
-        # ==== 6. 应用 H_res 进行流内混合 ====
+
+        # ==== 6. Apply H_res for intra-stream mixing ====
         # x_stream_current = H_res @ x_stream_prev + attn_stream
-        # 这里 x_stream 是上一层的残差流
-        
-        # 将 x_stream 重塑为 (b, s, n, C) 以便于矩阵乘法
+        # Here x_stream is the residual stream from previous layer
+
+        # Reshape x_stream to (b, s, n, C) for matrix multiplication
         x_stream_reshaped = rearrange(x_stream, 'b s (n c) -> b s n c', n=self.n, c=C)
-        
-        # H_res: (b, s, n, n) 对 n 个流进行混合
-        # 对每个位置和批次，做 n×n 矩阵乘 n×C
+
+        # H_res: (b, s, n, n) mixes n streams
+        # For each position and batch, do n x n matrix times n x C
         x_stream_mixed = einsum(H_res, x_stream_reshaped, 'b s n1 n2, b s n2 c -> b s n1 c')
-        
-        # 加上投影后的注意力输出
+
+        # Add projected attention output
         x_stream_updated = x_stream_mixed + attn_stream
-        
-        # ==== 7. 通过 FFN（需要先聚合回 C 维） ====
-        # 对更新后的流再次聚合，得到 FFN 的输入
+
+        # ==== 7. Pass through FFN (need to aggregate back to C dimensions first) ====
+        # Aggregate updated stream again to get FFN input
         x_ffn_input = einsum(H_pre, x_stream_updated, 'b s n, b s n c -> b s c')
-        
+
         ffn_output = self.ffn(x_ffn_input)
-        
-        # ==== 8. 再次应用 H_post 投影回流 ====
+
+        # ==== 8. Apply H_post again to project back to stream ====
         ffn_output_expanded = repeat(ffn_output, 'b s c -> b s n c', n=self.n)
         ffn_stream = ffn_output_expanded * H_post.unsqueeze(-1)
-        
-        # ==== 9. 最终残差流更新 ====
+
+        # ==== 9. Final residual stream update ====
         x_stream_final = x_stream_updated + ffn_stream
-        
-        # ==== 10. 聚合回 C 维输出 ====
-        # 最终输出是 H_pre 加权的流的和
+
+        # ==== 10. Aggregate back to C-dimensional output ====
+        # Final output is H_pre weighted sum of streams
         x_output = einsum(H_pre, x_stream_final, 'b s n, b s n c -> b s c')
-        
-        # 应用 dropout
+
+        # Apply dropout
         x_output = self.dropout(x_output)
-        
+
         return x_output
 
 
 class mHCTransformerLM(nn.Module):
     """
-    完整的 mHC Transformer 语言模型
+    Complete mHC Transformer Language Model
     """
     def __init__(
         self,
@@ -468,7 +468,7 @@ class mHCTransformerLM(nn.Module):
         self.expansion_rate = expansion_rate
         self.theta = theta
         
-        # token embedding 不变，输出 d_model 维
+        # token embedding unchanged, outputs d_model dimensions
         self.token_embedding = Embedding(
             vocab_size,
             d_model,
@@ -476,7 +476,7 @@ class mHCTransformerLM(nn.Module):
             dtype=dtype
         )
         
-        # 使用 mHC 的 Transformer Block
+        # Use mHC Transformer Blocks
         self.blocks = nn.ModuleList([
             mHCTransformerBlock(
                 d_model=d_model,
@@ -508,13 +508,13 @@ class mHCTransformerLM(nn.Module):
         # token embedding: (batch, seq_len) -> (batch, seq_len, d_model)
         x = self.token_embedding(input_ids)
         
-        # 如果未提供位置信息，使用默认位置
+        # If positions not provided, use default positions
         if token_positions is None:
             seq_len = input_ids.shape[1]
             token_positions = torch.arange(seq_len, device=input_ids.device)
             token_positions = token_positions.unsqueeze(0).expand(input_ids.shape[0], -1)
         
-        # 通过 mHC 块
+        # Pass through mHC blocks
         for block in self.blocks:
             x = block(x, token_positions)
             
@@ -524,8 +524,8 @@ class mHCTransformerLM(nn.Module):
         return logits
 
 
-# ========== 为了方便对比，也保留原始 Transformer 的导入 ==========
-# 注意：您原来的 TransformerBlock 和 TransformerLM 在另一个文件中
-# 这里为了完整性，注释掉，您可以根据需要导入
+# ========== For comparison, also keep original Transformer import ==========
+# Note: Your original TransformerBlock and TransformerLM are in another file
+# Commented out here for completeness, you can import as needed
 # from cs336_basics.model import TransformerBlock as OriginalTransformerBlock
 # from cs336_basics.model import TransformerLM as OriginalTransformerLM

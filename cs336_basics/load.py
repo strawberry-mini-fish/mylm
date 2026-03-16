@@ -4,7 +4,7 @@ import os
 import typing
 
 def get_batch(x,batch_size,context_length,device):
-    assert x.ndim==1,"x应该是一维数组"
+    assert x.ndim==1,"x should be a 1D array"
     max_start_isx=len(x)-context_length
     start_indices=torch.randint(0,max_start_isx,size=(batch_size,))
     inputs_list=[]
@@ -25,9 +25,9 @@ def save_checkpoint(model,optimizer,iteration,out):
     model_state=model.state_dict()
     optimizer_state=optimizer.state_dict()
     checkpoint = {
-        'model_state_dict': model_state,      # 模型权重
-        'optimizer_state_dict': optimizer_state,  # 优化器状态
-        'iteration': iteration                 # 当前迭代次数
+        'model_state_dict': model_state,      # model weights
+        'optimizer_state_dict': optimizer_state,  # optimizer state
+        'iteration': iteration                 # current iteration
     }
     torch.save(checkpoint, out)
 

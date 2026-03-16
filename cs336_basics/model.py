@@ -55,7 +55,7 @@ class SwiGLU(nn.Module):
         else:
             self.d_ff=d_ff
         
-        print(f"d_model={d_model},d_ff={self.d_ff}(理论值={int(8/3*d_model)})")
+        print(f"d_model={d_model},d_ff={self.d_ff}(theoretical={int(8/3*d_model)})")
 
         self.W1=Linear(d_model,self.d_ff,device=device,dtype=dtype)
         self.W3=Linear(d_model,self.d_ff,device=device,dtype=dtype)
@@ -63,17 +63,17 @@ class SwiGLU(nn.Module):
         
     def forward(self,x):
         input_shape=x.shape
-        act = self.W1(x)        # 激活路径
-        act = F.silu(act)        # 激活
-    
-        gate = self.W3(x)        # 门控路径（不激活）
-    
-        gated = act * gate       # GLU 相乘
-    
-        output = self.W2(gated)  # 输出投影
-    
+        act = self.W1(x)        # activation path
+        act = F.silu(act)        # activation
+
+        gate = self.W3(x)        # gate path (no activation)
+
+        gated = act * gate       # GLU multiplication
+
+        output = self.W2(gated)  # output projection
+
         assert output.shape == input_shape, \
-        f"输出形状{output.shape}应与输入形状{input_shape}相同"
+        f"output shape {output.shape} should match input shape {input_shape}"
         return output
     
     def extra_repr(self):
@@ -85,7 +85,7 @@ class RotaryPositionalEmbedding(nn.Module):
         self.theta=theta
         self.d_k=d_k
         self.max_seq_len=max_seq_len
-        assert d_k%2==0,"d_k必须是偶数才能旋转"
+        assert d_k%2==0,"d_k must be even for rotation"
         self._build_cache(device)
     def _build_cache(self,device):
         positions=torch.arange(self.max_seq_len,device=device).float()
