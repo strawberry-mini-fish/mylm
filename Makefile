@@ -3,7 +3,7 @@
 # Training script
 PYTHON = ./.venv/bin/python
 TRAIN_SCRIPT = ./cs336_basics/train.py
-TOKENIZE_SCRIPT = ./cs336_basics/tokenize.py
+TOKENIZE_SCRIPT = ./cs336_basics/pretokenize.py
 
 # Output directories
 OUTPUT_DIR_ORIGINAL = ./checkpoints/original
