@@ -332,7 +332,7 @@ class mHCTransformerBlock(nn.Module):
         num_heads: int,
         d_ff: int,
         max_seq_len: int,
-        expansion_rate: int = 4,  # n from paper
+        expansion_rate: int = 2,  # n from paper, using 2 for small models
         theta: float = 10000.0,
         dropout: float = 0.1,
         device: Optional[torch.device] = None,
@@ -467,7 +467,7 @@ class mHCTransformerLM(nn.Module):
         d_ff: int,
         num_layers: int,
         context_length: int,
-        expansion_rate: int = 4,
+        expansion_rate: int = 2,  # Using 2 for small models
         theta: float = 10000.0,
         dropout: float = 0.1,
         device: Optional[torch.device] = None,
