@@ -50,14 +50,14 @@ def run_swiglu(
     in_features: Float[Tensor, " ... d_model"],
 ) -> Float[Tensor, " ... d_model"]:
     print("="*50)
-    print("run_swiglu 被调用:")
+    print("run_swiglu called:")
     print(f"  d_model: {d_model}")
     print(f"  w1.shape: {w1_weight.shape}")
     print(f"  w2.shape: {w2_weight.shape}")
     print(f"  w3.shape: {w3_weight.shape}")
     print(f"  in_features.shape: {in_features.shape}")
     d_ff = w1_weight.shape[0]
-    print(f"  推断 d_ff = {d_ff}")
+    print(f"  inferred d_ff = {d_ff}")
     from cs336_basics.model import SwiGLU
     swiglu=SwiGLU(d_model,d_ff)
     state_dict = {
@@ -192,9 +192,9 @@ def run_transformer_block(
     state_dict["self_attention.linearK.W"] = weights["attn.k_proj.weight"]
     state_dict["self_attention.linearV.W"] = weights["attn.v_proj.weight"]
     state_dict["self_attention.linearO.W"] = weights["attn.output_proj.weight"]
-    state_dict["ffn.W1.W"] = weights["ffn.w1.weight"]  # 键名大写，值从小写获取
-    state_dict["ffn.W3.W"] = weights["ffn.w3.weight"]  # 键名大写，值从小写获取
-    state_dict["ffn.W2.W"] = weights["ffn.w2.weight"]  # 键名大写，值从小写获取
+    state_dict["ffn.W1.W"] = weights["ffn.w1.weight"]  # key name uppercase, value from lowercase
+    state_dict["ffn.W3.W"] = weights["ffn.w3.weight"]  # key name uppercase, value from lowercase
+    state_dict["ffn.W2.W"] = weights["ffn.w2.weight"]  # key name uppercase, value from lowercase
 
     
     transformer_block.load_state_dict(state_dict)
@@ -249,14 +249,14 @@ def run_transformer_lm(
     state_dict["token_embedding.weight"] = weights["token_embeddings.weight"]
     for i in range(num_layers):
         prefix = f"blocks.{i}."
-        
-        # 第一个RMSNorm
+
+        # First RMSNorm
         state_dict[f"{prefix}norm1.weight"] = weights[f"layers.{i}.ln1.weight"]
-        
-        # 第二个RMSNorm
+
+        # Second RMSNorm
         state_dict[f"{prefix}norm2.weight"] = weights[f"layers.{i}.ln2.weight"]
-        
-        # 自注意力层的权重
+
+        # Self-attention layer weights
         state_dict[f"{prefix}self_attention.linearQ.W"] = weights[f"layers.{i}.attn.q_proj.weight"]
         state_dict[f"{prefix}self_attention.linearK.W"] = weights[f"layers.{i}.attn.k_proj.weight"]
         state_dict[f"{prefix}self_attention.linearV.W"] = weights[f"layers.{i}.attn.v_proj.weight"]
@@ -265,21 +265,21 @@ def run_transformer_lm(
         w1 = weights[f"layers.{i}.ffn.w1.weight"]  # [d_model, d_ff]
         w3 = weights[f"layers.{i}.ffn.w3.weight"]  # [d_model, d_ff]
         w2 = weights[f"layers.{i}.ffn.w2.weight"]  # [d_ff, d_model]
-        
-        # 根据你的Linear类实现决定是否需要转置
-        # 如果你的Linear类期望 [out_features, in_features]，则需要转置
+
+        # Determine if transpose is needed based on your Linear class implementation
+        # If your Linear class expects [out_features, in_features], need to transpose
         state_dict[f"{prefix}ffn.W1.W"] = w1.T  # [d_ff, d_model]
         state_dict[f"{prefix}ffn.W3.W"] = w3.T  # [d_ff, d_model]
         state_dict[f"{prefix}ffn.W2.W"] = w2.T  # [d_model, d_ff]
 
     state_dict["ln_final.weight"] = weights["ln_final.weight"]
-    
-    # 3.4 输出投影层 (lm_head)
+
+    # 3.4 Output projection layer (lm_head)
     state_dict["output_projection.W"] = weights["lm_head.weight"]
-    
-    # 4. 打印权重形状以便调试
+
+    # 4. Print weight shapes for debugging
     print("\n--- Weight shapes after mapping ---")
-    for i in range(min(num_layers, 1)):  # 只打印第一层
+    for i in range(min(num_layers, 1)):  # Only print first layer
         print(f"\nLayer {i}:")
         print(f"  W1: {state_dict[f'blocks.{i}.ffn.W1.W'].shape}")
         print(f"  W3: {state_dict[f'blocks.{i}.ffn.W3.W'].shape}")
@@ -290,12 +290,12 @@ def run_transformer_lm(
         print("\n✓ Weights loaded successfully")
     except Exception as e:
         print(f"\n✗ Error loading weights: {e}")
-        # 如果转置后还不行，尝试不转置
+        # If transpose doesn't work, try without transpose
         print("\nTrying without transpose...")
         state_dict_no_transpose = {}
         for k, v in state_dict.items():
             if 'ffn' in k and 'W' in k:
-                state_dict_no_transpose[k] = v.T  # 再转置回去
+                state_dict_no_transpose[k] = v.T  # Transpose back
             else:
                 state_dict_no_transpose[k] = v
         model.load_state_dict(state_dict_no_transpose)
@@ -303,8 +303,8 @@ def run_transformer_lm(
         batch_size, seq_len = in_indices.shape
     token_positions = torch.arange(seq_len, device=in_indices.device)
     token_positions = token_positions.unsqueeze(0).expand(batch_size, -1)
-    
-    # 7. 前向传播
+
+    # 7. Forward pass
     with torch.no_grad():
         logits = model(in_indices, token_positions)
     
