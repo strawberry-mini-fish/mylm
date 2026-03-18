@@ -117,7 +117,7 @@ train-all: train train-mhc
 
 # Train both models sequentially with TensorBoard logging for comparison
 train-compare:
-	@echo "Training both models with TensorBoard logging..."
+	@echo "Training both models alternately with TensorBoard logging..."
 	$(PYTHON) ./train_compare.py \
 		--vocab_size $(VOCAB_SIZE) \
 		--tokenizer_name $(TOKENIZER) \
@@ -127,10 +127,10 @@ train-compare:
 		--batch_size $(BATCH_SIZE) \
 		--context_length $(CONTEXT_LENGTH) \
 		--max_iters $(MAX_ITERS) \
+		--switch_interval 1000 \
 		--learning_rate $(LEARNING_RATE) \
 		--mhc_learning_rate $(MHC_LEARNING_RATE) \
 		--warmup_iters $(MHC_WARMUP_ITERS) \
-		--eval_interval $(EVAL_INTERVAL) \
 		--log_interval $(LOG_INTERVAL) \
 		--expansion_rate $(MHC_EXPANSION_RATE) \
 		--max_samples $(MAX_SAMPLES) \

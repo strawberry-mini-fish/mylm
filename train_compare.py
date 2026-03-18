@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Train both original Transformer and mHC models sequentially,
+Train original Transformer and mHC models alternately,
 logging both losses to the same TensorBoard for comparison.
 """
 
@@ -9,7 +9,6 @@ import sys
 import argparse
 import time
 import logging
-from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -52,11 +51,11 @@ def parse_args():
     # Training
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--context_length", type=int, default=256)
-    parser.add_argument("--max_iters", type=int, default=10000, help="Iterations per model")
+    parser.add_argument("--max_iters", type=int, default=10000, help="Total iterations")
+    parser.add_argument("--switch_interval", type=int, default=1000, help="Switch models every N iterations")
     parser.add_argument("--learning_rate", type=float, default=3e-4)
     parser.add_argument("--mhc_learning_rate", type=float, default=1e-4, help="Learning rate for mHC")
     parser.add_argument("--warmup_iters", type=int, default=1000)
-    parser.add_argument("--eval_interval", type=int, default=500)
     parser.add_argument("--log_interval", type=int, default=50)
     parser.add_argument("--grad_clip", type=float, default=1.0)
 
@@ -117,99 +116,26 @@ def create_model(args, model_type, device):
         )
 
 
-@torch.no_grad()
-def evaluate(model, data, batch_size, context_length, device, model_type, eval_iters=100):
-    """Evaluate model loss."""
-    model.eval()
-    losses = []
-    for _ in range(eval_iters):
-        X, Y = get_batch(data, batch_size, context_length, device)
-        if model_type == "mhc":
-            token_positions = torch.arange(context_length, device=device)
-            token_positions = token_positions.unsqueeze(0).expand(batch_size, -1)
-            logits = model(X, token_positions)
-        else:
-            logits = model(X)
-        loss = cross_entropy(logits, Y)
-        losses.append(loss.item())
-    model.train()
-    return np.mean(losses)
+def train_step(model, optimizer, train_data, args, device, model_type):
+    """Single training step, returns loss."""
+    X, Y = get_batch(train_data, args.batch_size, args.context_length, device)
 
+    if model_type == "mhc":
+        token_positions = torch.arange(args.context_length, device=device)
+        token_positions = token_positions.unsqueeze(0).expand(args.batch_size, -1)
+        logits = model(X, token_positions)
+    else:
+        logits = model(X)
 
-def train_model(args, model_type, train_data, tokenizer, writer, global_step_offset, device):
-    """Train a single model and return final loss."""
-    logger.info("=" * 60)
-    logger.info(f"Training {model_type.upper()} model")
-    logger.info("=" * 60)
+    loss = cross_entropy(logits, Y)
 
-    # Create model
-    model = create_model(args, model_type, device)
-    n_params = sum(p.numel() for p in model.parameters())
-    logger.info(f"Model parameters: {n_params / 1e6:.2f}M")
+    optimizer.zero_grad()
+    loss.backward()
+    if args.grad_clip > 0:
+        gradient_clipping(model.parameters(), args.grad_clip)
+    optimizer.step()
 
-    # Learning rate
-    lr = args.learning_rate if model_type == "original" else args.mhc_learning_rate
-
-    # Optimizer
-    optimizer = AdamW(model.parameters(), lr=lr, weight_decay=0.1, betas=(0.9, 0.95))
-
-    # Training loop
-    model.train()
-    train_losses = []
-
-    for iter in range(args.max_iters):
-        # Learning rate schedule
-        current_lr = cosine_lr_schedule(iter, lr, args.warmup_iters, args.max_iters, lr * 0.1)
-        for param_group in optimizer.param_groups:
-            param_group['lr'] = current_lr
-
-        # Get batch
-        X, Y = get_batch(train_data, args.batch_size, args.context_length, device)
-
-        # Forward pass
-        if model_type == "mhc":
-            token_positions = torch.arange(args.context_length, device=device)
-            token_positions = token_positions.unsqueeze(0).expand(args.batch_size, -1)
-            logits = model(X, token_positions)
-        else:
-            logits = model(X)
-
-        loss = cross_entropy(logits, Y)
-        train_losses.append(loss.item())
-
-        # Backward pass
-        optimizer.zero_grad()
-        loss.backward()
-        if args.grad_clip > 0:
-            gradient_clipping(model.parameters(), args.grad_clip)
-        optimizer.step()
-
-        # Logging
-        global_step = global_step_offset + iter
-        if writer is not None:
-            writer.add_scalar(f"loss/{model_type}", loss.item(), global_step)
-            writer.add_scalar(f"lr/{model_type}", current_lr, global_step)
-
-        if iter % args.log_interval == 0:
-            avg_loss = np.mean(train_losses[-args.log_interval:])
-            logger.info(f"[{model_type}] iter {iter:5d}/{args.max_iters} | loss {avg_loss:.4f} | lr {current_lr:.2e}")
-
-        # Evaluation
-        if iter % args.eval_interval == 0 and iter > 0:
-            eval_loss = evaluate(model, train_data, args.batch_size, args.context_length, device, model_type)
-            if writer is not None:
-                writer.add_scalar(f"eval_loss/{model_type}", eval_loss, global_step)
-            logger.info(f"[{model_type}] eval loss: {eval_loss:.4f}")
-
-    # Save final model
-    save_dir = os.path.join(args.output_dir, model_type)
-    os.makedirs(save_dir, exist_ok=True)
-    save_checkpoint(model, optimizer, args.max_iters, os.path.join(save_dir, "final_model.pt"))
-
-    final_loss = np.mean(train_losses[-100:])
-    logger.info(f"[{model_type}] Training complete! Final loss: {final_loss:.4f}")
-
-    return global_step_offset + args.max_iters
+    return loss.item()
 
 
 def main():
@@ -240,17 +166,113 @@ def main():
     logger.info("Loading data...")
     train_data = load_data(args, tokenizer)
 
-    # Train original model first
-    global_step = 0
-    global_step = train_model(args, "original", train_data, tokenizer, writer, global_step, device)
+    # Create both models
+    logger.info("=" * 60)
+    logger.info("Creating models...")
 
-    # Train mHC model
-    global_step = train_model(args, "mhc", train_data, tokenizer, writer, global_step, device)
+    model_original = create_model(args, "original", device)
+    model_mhc = create_model(args, "mhc", device)
+
+    n_params_original = sum(p.numel() for p in model_original.parameters())
+    n_params_mhc = sum(p.numel() for p in model_mhc.parameters())
+    logger.info(f"Original model: {n_params_original / 1e6:.2f}M parameters")
+    logger.info(f"mHC model: {n_params_mhc / 1e6:.2f}M parameters")
+
+    # Create optimizers
+    optimizer_original = AdamW(model_original.parameters(), lr=args.learning_rate, weight_decay=0.1, betas=(0.9, 0.95))
+    optimizer_mhc = AdamW(model_mhc.parameters(), lr=args.mhc_learning_rate, weight_decay=0.1, betas=(0.9, 0.95))
+
+    # Track iterations per model
+    iter_original = 0
+    iter_mhc = 0
+
+    # Loss history
+    losses_original = []
+    losses_mhc = []
+
+    logger.info("=" * 60)
+    logger.info(f"Starting alternating training...")
+    logger.info(f"Total iterations: {args.max_iters}")
+    logger.info(f"Switch interval: {args.switch_interval}")
+    logger.info("=" * 60)
+
+    global_step = 0
+    current_model = "original"  # Start with original
+
+    while iter_original < args.max_iters or iter_mhc < args.max_iters:
+        # Determine which model to train
+        if current_model == "original" and iter_original >= args.max_iters:
+            current_model = "mhc"
+        elif current_model == "mhc" and iter_mhc >= args.max_iters:
+            current_model = "original"
+
+        # Select model and optimizer
+        if current_model == "original":
+            model = model_original
+            optimizer = optimizer_original
+            lr = args.learning_rate
+            model_iter = iter_original
+        else:
+            model = model_mhc
+            optimizer = optimizer_mhc
+            lr = args.mhc_learning_rate
+            model_iter = iter_mhc
+
+        # Compute learning rate
+        current_lr = cosine_lr_schedule(model_iter, lr, args.warmup_iters, args.max_iters, lr * 0.1)
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = current_lr
+
+        # Training step
+        model.train()
+        loss = train_step(model, optimizer, train_data, args, device, current_model)
+
+        # Update counters
+        if current_model == "original":
+            iter_original += 1
+            losses_original.append(loss)
+        else:
+            iter_mhc += 1
+            losses_mhc.append(loss)
+
+        # Logging
+        if writer is not None:
+            writer.add_scalar(f"loss/{current_model}", loss, global_step)
+            writer.add_scalar(f"lr/{current_model}", current_lr, global_step)
+
+        if global_step % args.log_interval == 0:
+            logger.info(f"[{current_model:8s}] step {global_step:5d} | "
+                       f"original iter {iter_original:5d} | mHC iter {iter_mhc:5d} | "
+                       f"loss {loss:.4f} | lr {current_lr:.2e}")
+
+        global_step += 1
+
+        # Switch models every switch_interval
+        if global_step % args.switch_interval == 0:
+            if current_model == "original" and iter_mhc < args.max_iters:
+                current_model = "mhc"
+            elif current_model == "mhc" and iter_original < args.max_iters:
+                current_model = "original"
+            logger.info(f"Switching to {current_model} model")
+
+    # Save final models
+    logger.info("=" * 60)
+    logger.info("Training complete!")
+
+    save_dir = os.path.join(args.output_dir, "original")
+    os.makedirs(save_dir, exist_ok=True)
+    save_checkpoint(model_original, optimizer_original, iter_original, os.path.join(save_dir, "final_model.pt"))
+
+    save_dir = os.path.join(args.output_dir, "mhc")
+    os.makedirs(save_dir, exist_ok=True)
+    save_checkpoint(model_mhc, optimizer_mhc, iter_mhc, os.path.join(save_dir, "final_model.pt"))
+
+    logger.info(f"Original model final loss: {np.mean(losses_original[-100:]):.4f}")
+    logger.info(f"mHC model final loss: {np.mean(losses_mhc[-100:]):.4f}")
 
     if writer is not None:
         writer.close()
-    logger.info("=" * 60)
-    logger.info("Comparison training complete!")
+
     if HAS_TENSORBOARD:
         logger.info(f"View TensorBoard: tensorboard --logdir {args.tensorboard_dir}")
     logger.info("=" * 60)
