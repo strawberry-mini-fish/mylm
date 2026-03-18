@@ -214,7 +214,7 @@ class CasualMultiheadSelfAttention(nn.Module):
 
 
 # ========== mHC Core Components ==========
-def sinkhorn_knopp(M: torch.Tensor, num_iter: int = 20, eps: float = 1e-6) -> torch.Tensor:
+def sinkhorn_knopp(M: torch.Tensor, num_iter: int = 20, eps: float = 1e-5) -> torch.Tensor:
     """
     Project matrix onto doubly stochastic matrix manifold using Sinkhorn-Knopp algorithm.
     From Section 4.2 of mHC paper: transforms input matrix to doubly stochastic matrix
@@ -279,9 +279,10 @@ class ManifoldHyperConnection(nn.Module):
 
         # Learnable gating factors alpha (scalar)
         # Paper: initialized to small values for stability
-        self.alpha_pre = nn.Parameter(torch.tensor(0.01, device=device, dtype=dtype))
-        self.alpha_post = nn.Parameter(torch.tensor(0.01, device=device, dtype=dtype))
-        self.alpha_res = nn.Parameter(torch.tensor(0.01, device=device, dtype=dtype))
+        # Use smaller values to prevent initial NaN
+        self.alpha_pre = nn.Parameter(torch.tensor(1e-5, device=device, dtype=dtype))
+        self.alpha_post = nn.Parameter(torch.tensor(1e-5, device=device, dtype=dtype))
+        self.alpha_res = nn.Parameter(torch.tensor(1e-5, device=device, dtype=dtype))
 
         # Learnable biases b (static mappings)
         # Paper Eq. (7): b_pre, b_post ∈ R^{1×n}, b_res ∈ R^{n×n}
@@ -294,7 +295,7 @@ class ManifoldHyperConnection(nn.Module):
 
     def _init_weights(self):
         # Use smaller std for numerical stability
-        std = 0.02
+        std = 0.01
         nn.init.trunc_normal_(self.phi_pre, std=std, a=-3*std, b=3*std)
         nn.init.trunc_normal_(self.phi_post, std=std, a=-3*std, b=3*std)
         nn.init.trunc_normal_(self.phi_res, std=std, a=-3*std, b=3*std)
