@@ -60,13 +60,11 @@ class RMSNorm(nn.Module):
 
     @staticmethod
     def apply(x: torch.Tensor, dim: int):
-        """Static method for RMSNorm in mHC"""
+        """Static method for RMSNorm in mHC - no learnable weights"""
         eps = 1e-6
         x_float = x.to(torch.float32)
         rms = torch.sqrt(x_float.pow(2).mean(dim=-1, keepdim=True) + eps)
         result = x_float / rms
-        # Clamp to prevent extreme values that cause NaN
-        result = torch.clamp(result, min=-10, max=10)
         return result.to(x.dtype)
 
 class SwiGLU(nn.Module):
@@ -314,19 +312,16 @@ class ManifoldHyperConnection(nn.Module):
         nn.init.trunc_normal_(self.phi_post, std=std, a=-3*std, b=3*std)
         nn.init.trunc_normal_(self.phi_res, std=std, a=-3*std, b=3*std)
 
-    def forward(self, x: torch.Tensor) -> tuple:
+    def forward(self, x_stream_normed: torch.Tensor) -> tuple:
         """
         Forward pass for mHC mapping computation.
         Paper Section 4.2: Parameterization and Manifold Projection
 
-        x: input, shape (..., nC) - flattened residual stream vector x_vec_l
+        x_stream_normed: already normalized stream, shape (..., n, C)
         Returns: (H_pre, H_post, H_res) - three constrained mappings
         """
-        # Paper Eq. (7): Compute raw mappings with RMSNorm and dynamic+static components
-        # x'_l = RMSNorm(vec(x_l))
-
-        # RMSNorm on flattened input (operates on last dimension)
-        x_norm = RMSNorm.apply(x, x.shape[-1])  # (..., nC)
+        # Flatten the already-normalized stream to (..., nC)
+        x_norm = rearrange(x_stream_normed, '... n c -> ... (n c)')  # (..., nC)
 
         # Paper Eq. (7): Compute H_tilde (pre-constraint) matrices
         # H_pre_tilde = alpha_pre * (x_norm @ phi_pre) + b_pre
@@ -433,12 +428,12 @@ class mHCTransformerBlock(nn.Module):
         # Dropout for regularization
         self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
 
-    def _compute_mhc_mappings(self, x_stream: torch.Tensor, mhc_module: ManifoldHyperConnection):
+    def _compute_mhc_mappings(self, x_stream_normed: torch.Tensor, mhc_module: ManifoldHyperConnection):
         """
         Compute mHC mappings for a sub-layer.
 
         Args:
-            x_stream: residual stream, shape (batch, seq_len, n, C)
+            x_stream_normed: already normalized stream, shape (batch, seq_len, n, C)
             mhc_module: ManifoldHyperConnection module (attention or FFN specific)
 
         Returns:
@@ -446,13 +441,13 @@ class mHCTransformerBlock(nn.Module):
             H_post: shape (batch, seq_len, n)
             H_res: shape (batch, seq_len, n, n)
         """
-        batch_size, seq_len = x_stream.shape[:2]
+        batch_size, seq_len = x_stream_normed.shape[:2]
 
-        # Flatten to (b*s, nC) to compute H mappings
-        x_flat = rearrange(x_stream, 'b s n c -> (b s) (n c)')  # (b*s, n*C)
+        # Reshape to (b*s, n, C) for ManifoldHyperConnection
+        x_reshaped = rearrange(x_stream_normed, 'b s n c -> (b s) n c')  # (b*s, n, C)
 
         # Compute constrained mappings H_pre, H_post, H_res
-        H_pre, H_post, H_res = mhc_module(x_flat)  # Shapes: (b*s, n), (b*s, n), (b*s, n, n)
+        H_pre, H_post, H_res = mhc_module(x_reshaped)  # Shapes: (b*s, n), (b*s, n), (b*s, n, n)
 
         # Restore batch and seq_len dimensions
         H_pre = rearrange(H_pre, '(b s) n -> b s n', b=batch_size, s=seq_len)  # (b, s, n)
