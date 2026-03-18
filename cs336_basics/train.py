@@ -255,7 +255,8 @@ def create_model(args, device):
             expansion_rate=args.expansion_rate,
             theta=10000.0,
             dropout=args.dropout,
-            device=device
+            device=device,
+            dtype=torch.float32
         )
         
         if args.grad_clip == 1.0:
