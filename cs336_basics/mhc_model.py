@@ -451,6 +451,7 @@ class mHCTransformerBlock(nn.Module):
     def _apply_mhc_sublayer(
         self,
         x_stream: torch.Tensor,
+        x_stream_normed: torch.Tensor,
         H_pre: torch.Tensor,
         H_post: torch.Tensor,
         H_res: torch.Tensor,
@@ -462,7 +463,8 @@ class mHCTransformerBlock(nn.Module):
         Paper Eq. (3): x_{l+1} = H_res * x_l + (H_post)^T * F(H_pre * x_l, W_l)
 
         Args:
-            x_stream: residual stream, shape (batch, seq_len, n, C)
+            x_stream: residual stream (un-normalized), shape (batch, seq_len, n, C)
+            x_stream_normed: normalized stream for sublayer input, shape (batch, seq_len, n, C)
             H_pre: pre-aggregation weights, shape (batch, seq_len, n)
             H_post: post-expansion weights, shape (batch, seq_len, n)
             H_res: residual mixing matrix, shape (batch, seq_len, n, n)
@@ -471,9 +473,9 @@ class mHCTransformerBlock(nn.Module):
         Returns:
             Updated residual stream, shape (batch, seq_len, n, C)
         """
-        # Step 1: H_pre * x_l - Aggregate n*C stream to C dimension
-        # Paper: H_pre aggregates features from the n*C-dim stream into a C-dim layer input
-        x_sublayer_in = einsum(H_pre, x_stream, 'b s n, b s n c -> b s c')  # (b, s, C)
+        # Step 1: H_pre * x_l_normed - Aggregate n*C stream to C dimension
+        # Use normalized stream for sublayer input (pre-norm architecture)
+        x_sublayer_in = einsum(H_pre, x_stream_normed, 'b s n, b s n c -> b s c')  # (b, s, C)
 
         # Step 2: Apply sub-layer function F
         sublayer_out = sublayer_fn(x_sublayer_in)  # (b, s, C)
@@ -482,7 +484,7 @@ class mHCTransformerBlock(nn.Module):
         # Paper: H_post maps the layer output back onto the stream
         sublayer_stream = einsum(H_post, sublayer_out, 'b s n, b s c -> b s n c')  # (b, s, n, C)
 
-        # Step 4: H_res * x_l - Mix the residual stream
+        # Step 4: H_res * x_l - Mix the residual stream (use un-normalized for residual)
         # Paper: H_res is a learnable mapping that mixes features within the residual stream
         x_res_mixed = einsum(H_res, x_stream, 'b s n1 n2, b s n2 c -> b s n1 c')  # (b, s, n, C)
 
@@ -525,7 +527,7 @@ class mHCTransformerBlock(nn.Module):
         def attn_fn(x_in):
             return self.self_attention(x_in, token_positions)
 
-        x_stream = self._apply_mhc_sublayer(x_stream, H_pre_attn, H_post_attn, H_res_attn, attn_fn)
+        x_stream = self._apply_mhc_sublayer(x_stream, x_stream_normed, H_pre_attn, H_post_attn, H_res_attn, attn_fn)
 
         # ==== Step 3: FFN sub-layer with mHC ====
         # Pre-norm: Apply RMSNorm before FFN
@@ -537,7 +539,7 @@ class mHCTransformerBlock(nn.Module):
         H_pre_ffn, H_post_ffn, H_res_ffn = self._compute_mhc_mappings(x_stream_normed, self.mhc_ffn)
 
         # Apply FFN with mHC
-        x_stream = self._apply_mhc_sublayer(x_stream, H_pre_ffn, H_post_ffn, H_res_ffn, self.ffn)
+        x_stream = self._apply_mhc_sublayer(x_stream, x_stream_normed, H_pre_ffn, H_post_ffn, H_res_ffn, self.ffn)
 
         # ==== Step 4: Aggregate n*C stream back to C dimension for output ====
         # Mean aggregation across streams for final output
