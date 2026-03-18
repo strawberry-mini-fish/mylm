@@ -365,7 +365,7 @@ class mHCTransformerBlock(nn.Module):
         max_seq_len: int,
         expansion_rate: int = 2,  # n from paper, using 2 for small models
         theta: float = 10000.0,
-        dropout: float = 0.1,
+        dropout: float = 0.0,
         device: Optional[torch.device] = None,
         dtype: Optional[torch.dtype] = None
     ):
@@ -572,7 +572,7 @@ class mHCTransformerLM(nn.Module):
         context_length: int,
         expansion_rate: int = 2,  # n from paper, using 2 for small models (paper uses 4)
         theta: float = 10000.0,
-        dropout: float = 0.1,
+        dropout: float = 0.0,
         device: Optional[torch.device] = None,
         dtype: Optional[torch.dtype] = None
     ):

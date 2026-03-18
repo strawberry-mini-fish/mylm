@@ -217,9 +217,6 @@ class TransformerBlock(nn.Module):
         self.norm2=RMSNorm(d_model,device=device,dtype=dtype)
         self.ffn=SwiGLU(d_model=d_model,d_ff=d_ff,device=device,dtype=dtype)
 
-        # Dropout for fair comparison with mHC model
-        self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
-
     def forward(self,x:torch.Tensor,token_positions:torch.Tensor)->torch.Tensor:
         norm_x=self.norm1(x)
         attn_output=self.self_attention(norm_x,token_positions)
@@ -229,7 +226,6 @@ class TransformerBlock(nn.Module):
         ffn_output=self.ffn(norm_x)
         x=x+ffn_output
 
-        x = self.dropout(x)
         return x
 
 class TransformerLM(nn.Module):
@@ -242,7 +238,7 @@ class TransformerLM(nn.Module):
             num_layers:int,
             context_length:int,
             theta:float=10000.0,
-            dropout:float=0.1,
+            dropout:float=0.0,
             device: Optional[torch.device] = None,
             dtype: Optional[torch.dtype] = None
     ):
@@ -254,7 +250,6 @@ class TransformerLM(nn.Module):
         self.num_layers = num_layers
         self.context_length = context_length
         self.theta = theta
-        self.dropout = dropout
         self.token_embedding=Embedding(
             vocab_size,
             d_model,
@@ -268,7 +263,6 @@ class TransformerLM(nn.Module):
                 d_ff=d_ff,
                 max_seq_len=context_length,
                 theta=theta,
-                dropout=dropout,
                 device=device,
                 dtype=dtype
             )
