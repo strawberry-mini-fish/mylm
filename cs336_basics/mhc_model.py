@@ -542,9 +542,8 @@ class mHCTransformerBlock(nn.Module):
         x_stream = self._apply_mhc_sublayer(x_stream, x_stream_normed, H_pre_ffn, H_post_ffn, H_res_ffn, self.ffn)
 
         # ==== Step 4: Aggregate n*C stream back to C dimension for output ====
-        # Mean aggregation across streams for final output
-        # This maintains compatibility with standard Transformer interface
-        x_output = x_stream.mean(dim=2)  # (b, s, C)
+        # Sum aggregation (H_res already provides proper scaling)
+        x_output = x_stream.sum(dim=2)  # (b, s, C)
 
         # Apply dropout
         x_output = self.dropout(x_output)
