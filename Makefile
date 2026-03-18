@@ -28,6 +28,11 @@ EVAL_INTERVAL = 1000
 LOG_INTERVAL = 100
 SAVE_INTERVAL = 5000
 
+# mHC specific hyperparameters
+MHC_LEARNING_RATE = 1e-4
+MHC_WARMUP_ITERS = 4000
+MHC_EXPANSION_RATE = 2
+
 # Tokenization settings
 MAX_SAMPLES = 100000
 
@@ -94,13 +99,14 @@ train-mhc:
 		--batch_size $(BATCH_SIZE) \
 		--context_length $(CONTEXT_LENGTH) \
 		--max_iters $(MAX_ITERS) \
-		--learning_rate $(LEARNING_RATE) \
-		--warmup_iters $(WARMUP_ITERS) \
+		--learning_rate $(MHC_LEARNING_RATE) \
+		--warmup_iters $(MHC_WARMUP_ITERS) \
 		--eval_interval $(EVAL_INTERVAL) \
 		--log_interval $(LOG_INTERVAL) \
 		--save_interval $(SAVE_INTERVAL) \
 		--output_dir $(OUTPUT_DIR_MHC) \
 		--max_samples $(MAX_SAMPLES) \
+		--expansion_rate $(MHC_EXPANSION_RATE) \
 		--grad_clip 1.0
 
 # Train both models for comparison
