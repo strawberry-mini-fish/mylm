@@ -16,6 +16,7 @@ import torch
 import torch.nn as nn
 from datasets import load_dataset
 from transformers import AutoTokenizer
+import csv
 
 # Try to import TensorBoard, make it optional
 try:
@@ -157,6 +158,14 @@ def main():
         writer = None
         logger.info("TensorBoard not available, using file logging")
 
+    # CSV log file (always available)
+    csv_log_path = os.path.join(args.tensorboard_dir, "training_log.csv")
+    os.makedirs(args.tensorboard_dir, exist_ok=True)
+    csv_file = open(csv_log_path, 'w', newline='')
+    csv_writer = csv.writer(csv_file)
+    csv_writer.writerow(['step', 'model', 'loss', 'lr'])
+    logger.info(f"CSV logs: {csv_log_path}")
+
     # Load tokenizer
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_name)
     if tokenizer.pad_token is None:
@@ -240,6 +249,9 @@ def main():
             writer.add_scalar(f"loss/{current_model}", loss, global_step)
             writer.add_scalar(f"lr/{current_model}", current_lr, global_step)
 
+        # CSV logging (always)
+        csv_writer.writerow([global_step, current_model, loss, current_lr])
+
         if global_step % args.log_interval == 0:
             logger.info(f"[{current_model:8s}] step {global_step:5d} | "
                        f"original iter {iter_original:5d} | mHC iter {iter_mhc:5d} | "
@@ -272,6 +284,9 @@ def main():
 
     if writer is not None:
         writer.close()
+
+    csv_file.close()
+    logger.info(f"CSV log saved to: {csv_log_path}")
 
     if HAS_TENSORBOARD:
         logger.info(f"View TensorBoard: tensorboard --logdir {args.tensorboard_dir}")
