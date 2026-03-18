@@ -24,7 +24,7 @@ try:
     HAS_TENSORBOARD = True
 except ImportError:
     HAS_TENSORBOARD = False
-    logger.warning("TensorBoard not installed, will use file logging only")
+    print("Note: TensorBoard not installed, will use file logging only")
 
 from cs336_basics.model import TransformerLM
 from cs336_basics.mhc_model import mHCTransformerLM
