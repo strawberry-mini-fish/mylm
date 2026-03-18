@@ -1,4 +1,4 @@
-.PHONY: tokenize train train-mhc train-all clean clean-cache
+.PHONY: tokenize train train-mhc train-all train-compare clean clean-cache
 
 # Training script
 PYTHON = ./.venv/bin/python
@@ -114,6 +114,29 @@ train-all: train train-mhc
 	@echo "Both models trained successfully!"
 	@echo "Original Transformer checkpoints: $(OUTPUT_DIR_ORIGINAL)"
 	@echo "mHC Transformer checkpoints: $(OUTPUT_DIR_MHC)"
+
+# Train both models sequentially with TensorBoard logging for comparison
+train-compare:
+	@echo "Training both models with TensorBoard logging..."
+	$(PYTHON) ./train_compare.py \
+		--vocab_size $(VOCAB_SIZE) \
+		--tokenizer_name $(TOKENIZER) \
+		--n_layer $(N_LAYER) \
+		--n_head $(N_HEAD) \
+		--n_embd $(N_EMBD) \
+		--batch_size $(BATCH_SIZE) \
+		--context_length $(CONTEXT_LENGTH) \
+		--max_iters $(MAX_ITERS) \
+		--learning_rate $(LEARNING_RATE) \
+		--mhc_learning_rate $(MHC_LEARNING_RATE) \
+		--warmup_iters $(MHC_WARMUP_ITERS) \
+		--eval_interval $(EVAL_INTERVAL) \
+		--log_interval $(LOG_INTERVAL) \
+		--expansion_rate $(MHC_EXPANSION_RATE) \
+		--max_samples $(MAX_SAMPLES) \
+		--output_dir ./checkpoints \
+		--tensorboard_dir ./runs/compare
+	@echo "Training complete! View TensorBoard: tensorboard --logdir ./runs/compare"
 
 # ========== Cleanup ==========
 
