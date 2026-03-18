@@ -214,31 +214,43 @@ class CasualMultiheadSelfAttention(nn.Module):
 
 
 # ========== mHC Core Components ==========
-def sinkhorn_knopp(M: torch.Tensor, num_iter: int = 20) -> torch.Tensor:
+def sinkhorn_knopp(M: torch.Tensor, num_iter: int = 20, eps: float = 1e-6) -> torch.Tensor:
     """
-    Project matrix onto doubly stochastic matrix manifold
+    Project matrix onto doubly stochastic matrix manifold using Sinkhorn-Knopp algorithm.
+    From Section 4.2 of mHC paper: transforms input matrix to doubly stochastic matrix
+    where all rows and columns sum to 1.
+    
     M: input matrix, shape (..., n, n)
-    num_iter: number of iterations
+    num_iter: number of iterations (paper uses 20)
+    eps: numerical stability epsilon
     Returns: doubly stochastic matrix
     """
+    # Paper Eq. (9): Start with M^(0) = exp(tilde{H}^res)
     # Clamp M to prevent overflow in exp
-    M_clamped = torch.clamp(M, min=-10, max=10)
-    # Ensure all elements are positive
-    M_pos = torch.exp(M_clamped)  # Paper uses exp first
+    M_clamped = torch.clamp(M, min=-20, max=20)
+    # Ensure all elements are positive via exponentiation
+    M_pos = torch.exp(M_clamped)
+    
     # Alternating row and column normalization
+    # Paper: M^(t) = T_r(T_c(M^(t-1)))
     for _ in range(num_iter):
-        # Row normalization
+        # Row normalization: T_r makes row sums equal to 1
         row_sum = M_pos.sum(dim=-1, keepdim=True)
-        M_pos = M_pos / (row_sum + 1e-6)
-        # Column normalization
+        M_pos = M_pos / (row_sum + eps)
+        
+        # Column normalization: T_c makes column sums equal to 1  
         col_sum = M_pos.sum(dim=-2, keepdim=True)
-        M_pos = M_pos / (col_sum + 1e-6)
+        M_pos = M_pos / (col_sum + eps)
+    
     return M_pos
 
 class ManifoldHyperConnection(nn.Module):
     """
     mHC: Manifold-Constrained Hyper-Connections
-    Expands residual stream from C dimensions to n*C dimensions with manifold constraints
+    Paper Section 4.2: Parameterization and Manifold Projection
+
+    Each layer (Attention or FFN sub-layer) has independent H_pre, H_post, H_res parameters.
+    This follows paper's design where each transformer layer has its own set of mappings.
     """
     def __init__(
         self,
@@ -266,57 +278,67 @@ class ManifoldHyperConnection(nn.Module):
         )
 
         # Learnable gating factors alpha (scalar)
+        # Paper: initialized to small values for stability
         self.alpha_pre = nn.Parameter(torch.tensor(0.01, device=device, dtype=dtype))
         self.alpha_post = nn.Parameter(torch.tensor(0.01, device=device, dtype=dtype))
         self.alpha_res = nn.Parameter(torch.tensor(0.01, device=device, dtype=dtype))
 
-        # Learnable biases b
+        # Learnable biases b (static mappings)
+        # Paper Eq. (7): b_pre, b_post ∈ R^{1×n}, b_res ∈ R^{n×n}
         self.b_pre = nn.Parameter(torch.zeros((1, self.n), device=device, dtype=dtype))
         self.b_post = nn.Parameter(torch.zeros((1, self.n), device=device, dtype=dtype))
         self.b_res = nn.Parameter(torch.zeros((self.n, self.n), device=device, dtype=dtype))
 
         # Initialize phi matrices
         self._init_weights()
-        
+
     def _init_weights(self):
         # Use smaller std for numerical stability
         std = 0.02
         nn.init.trunc_normal_(self.phi_pre, std=std, a=-3*std, b=3*std)
         nn.init.trunc_normal_(self.phi_post, std=std, a=-3*std, b=3*std)
         nn.init.trunc_normal_(self.phi_res, std=std, a=-3*std, b=3*std)
-        
+
     def forward(self, x: torch.Tensor) -> tuple:
         """
-        x: input, shape (..., n*C) - flattened residual stream
+        Forward pass for mHC mapping computation.
+        Paper Section 4.2: Parameterization and Manifold Projection
+
+        x: input, shape (..., nC) - flattened residual stream vector x_vec_l
         Returns: (H_pre, H_post, H_res) - three constrained mappings
         """
-        # x is already flattened vector, shape (..., n*C)
+        # Paper Eq. (7): Compute raw mappings with RMSNorm and dynamic+static components
+        # x'_l = RMSNorm(vec(x_l))
 
-        # RMSNorm in paper formula (7)
-        # Note: RMSNorm operates on the last dimension
-        x_norm = RMSNorm.apply(x, self.stream_dim)
+        # RMSNorm on flattened input (operates on last dimension)
+        x_norm = RMSNorm.apply(x, x.shape[-1])  # (..., nC)
 
-        # Paper formula (7): compute raw mappings
+        # Paper Eq. (7): Compute H_tilde (pre-constraint) matrices
         # H_pre_tilde = alpha_pre * (x_norm @ phi_pre) + b_pre
         H_pre_tilde = self.alpha_pre * (x_norm @ self.phi_pre) + self.b_pre  # (..., n)
 
         # H_post_tilde = alpha_post * (x_norm @ phi_post) + b_post
         H_post_tilde = self.alpha_post * (x_norm @ self.phi_post) + self.b_post  # (..., n)
 
-        # H_res_tilde = alpha_res * (x_norm @ phi_res) reshaped + b_res
+        # H_res_tilde = alpha_res * mat(x_norm @ phi_res) + b_res
+        # where mat(...) reshapes R^{1×n^2} to R^{n×n}
         H_res_tilde_flat = self.alpha_res * (x_norm @ self.phi_res)  # (..., n^2)
-        H_res_tilde = rearrange(H_res_tilde_flat, '... (n n2) -> ... n n2', n=self.n, n2=self.n)  # (..., n, n)
+        H_res_tilde = rearrange(H_res_tilde_flat, '... (n m) -> ... n m', n=self.n, m=self.n)  # (..., n, n)
         H_res_tilde = H_res_tilde + self.b_res
 
-        # Paper formula (8): apply constraints
-        # H_pre = sigmoid(H_pre_tilde)
-        H_pre = torch.sigmoid(H_pre_tilde)  # non-negative constraint
+        # Paper Eq. (8): Apply manifold constraint projections
+        # H_pre = sigma(H_pre_tilde) - sigmoid constraint (non-negative, range [0,1])
+        H_pre = torch.sigmoid(H_pre_tilde)  # (..., n)
 
-        # H_post = 2 * sigmoid(H_post_tilde)
-        H_post = 2 * torch.sigmoid(H_post_tilde)  # non-negative constraint, range [0,2]
+        # H_post = 2 * sigma(H_post_tilde) - sigmoid constraint scaled to [0,2]
+        # Paper Section 4.1: "we impose non-negativity constraints on H_pre and H_post"
+        # H_post scaled to [0,2] for expressivity
+        H_post = 2 * torch.sigmoid(H_post_tilde)  # (..., n)
 
-        # H_res = Sinkhorn-Knopp(H_res_tilde)
-        H_res = sinkhorn_knopp(H_res_tilde)  # doubly stochastic matrix constraint
+        # H_res = Sinkhorn-Knopp(H_res_tilde) - doubly stochastic constraint
+        # Paper Section 4.1: "constrain H_res to be a doubly stochastic matrix"
+        # Project onto Birkhoff polytope to ensure row and column sums = 1
+        H_res = sinkhorn_knopp(H_res_tilde, num_iter=20)  # (..., n, n)
 
         return H_pre, H_post, H_res
 
@@ -324,7 +346,16 @@ class ManifoldHyperConnection(nn.Module):
 class mHCTransformerBlock(nn.Module):
     """
     mHC-based Transformer Block
-    Expands residual stream from C dimensions to n*C dimensions
+
+    Paper architecture:
+    - Each Transformer block contains Attention and FFN as two separate "layers"
+    - Each layer has its own independent mHC parameters (H_pre, H_post, H_res)
+    - Pre-norm structure: RMSNorm is applied before each sub-layer
+
+    Paper Eq. (3): x_{l+1} = H_res * x_l + (H_post)^T * F(H_pre * x_l, W_l)
+
+    The residual stream dimension is n*C, maintained across layers.
+    For interface with standard Transformer, we expand C -> n*C at input and aggregate n*C -> C at output.
     """
     def __init__(
         self,
@@ -346,15 +377,27 @@ class mHCTransformerBlock(nn.Module):
         self.n = expansion_rate
         self.stream_dim = self.n * d_model
 
-        # mHC core module
-        self.mhc = ManifoldHyperConnection(
+        # Pre-norm layers (applied before each sub-layer)
+        self.ln1 = RMSNorm(d_model, device=device, dtype=dtype)
+        self.ln2 = RMSNorm(d_model, device=device, dtype=dtype)
+
+        # mHC for Attention sub-layer (each sub-layer has independent parameters)
+        self.mhc_attn = ManifoldHyperConnection(
             d_model=d_model,
             expansion_rate=expansion_rate,
             device=device,
             dtype=dtype
         )
 
-        # Note: attention and FFN input dimension is still d_model, not stream_dim
+        # mHC for FFN sub-layer (independent parameters)
+        self.mhc_ffn = ManifoldHyperConnection(
+            d_model=d_model,
+            expansion_rate=expansion_rate,
+            device=device,
+            dtype=dtype
+        )
+
+        # Attention layer: input/output dimension is d_model (C)
         self.self_attention = CasualMultiheadSelfAttention(
             d_model=d_model,
             num_heads=num_heads,
@@ -364,6 +407,7 @@ class mHCTransformerBlock(nn.Module):
             dtype=dtype
         )
 
+        # FFN layer: input/output dimension is d_model (C)
         self.ffn = SwiGLU(
             d_model=d_model,
             d_ff=d_ff,
@@ -371,83 +415,133 @@ class mHCTransformerBlock(nn.Module):
             dtype=dtype
         )
 
-        # Optional dropout
+        # Dropout for regularization
         self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
-        
+
+    def _compute_mhc_mappings(self, x_stream: torch.Tensor, mhc_module: ManifoldHyperConnection):
+        """
+        Compute mHC mappings for a sub-layer.
+
+        Args:
+            x_stream: residual stream, shape (batch, seq_len, n, C)
+            mhc_module: ManifoldHyperConnection module (attention or FFN specific)
+
+        Returns:
+            H_pre: shape (batch, seq_len, n)
+            H_post: shape (batch, seq_len, n)
+            H_res: shape (batch, seq_len, n, n)
+        """
+        batch_size, seq_len = x_stream.shape[:2]
+
+        # Flatten to (b*s, nC) to compute H mappings
+        x_flat = rearrange(x_stream, 'b s n c -> (b s) (n c)')  # (b*s, n*C)
+
+        # Compute constrained mappings H_pre, H_post, H_res
+        H_pre, H_post, H_res = mhc_module(x_flat)  # Shapes: (b*s, n), (b*s, n), (b*s, n, n)
+
+        # Restore batch and seq_len dimensions
+        H_pre = rearrange(H_pre, '(b s) n -> b s n', b=batch_size, s=seq_len)  # (b, s, n)
+        H_post = rearrange(H_post, '(b s) n -> b s n', b=batch_size, s=seq_len)  # (b, s, n)
+        H_res = rearrange(H_res, '(b s) n1 n2 -> b s n1 n2',
+                         b=batch_size, s=seq_len, n1=self.n, n2=self.n)  # (b, s, n, n)
+
+        return H_pre, H_post, H_res
+
+    def _apply_mhc_sublayer(
+        self,
+        x_stream: torch.Tensor,
+        H_pre: torch.Tensor,
+        H_post: torch.Tensor,
+        H_res: torch.Tensor,
+        sublayer_fn
+    ) -> torch.Tensor:
+        """
+        Apply mHC transformation for a sub-layer.
+
+        Paper Eq. (3): x_{l+1} = H_res * x_l + (H_post)^T * F(H_pre * x_l, W_l)
+
+        Args:
+            x_stream: residual stream, shape (batch, seq_len, n, C)
+            H_pre: pre-aggregation weights, shape (batch, seq_len, n)
+            H_post: post-expansion weights, shape (batch, seq_len, n)
+            H_res: residual mixing matrix, shape (batch, seq_len, n, n)
+            sublayer_fn: function F (attention or FFN)
+
+        Returns:
+            Updated residual stream, shape (batch, seq_len, n, C)
+        """
+        # Step 1: H_pre * x_l - Aggregate n*C stream to C dimension
+        # Paper: H_pre aggregates features from the n*C-dim stream into a C-dim layer input
+        x_sublayer_in = einsum(H_pre, x_stream, 'b s n, b s n c -> b s c')  # (b, s, C)
+
+        # Step 2: Apply sub-layer function F
+        sublayer_out = sublayer_fn(x_sublayer_in)  # (b, s, C)
+
+        # Step 3: (H_post)^T * F(...) - Expand C output back to n*C stream
+        # Paper: H_post maps the layer output back onto the stream
+        sublayer_stream = einsum(H_post, sublayer_out, 'b s n, b s c -> b s n c')  # (b, s, n, C)
+
+        # Step 4: H_res * x_l - Mix the residual stream
+        # Paper: H_res is a learnable mapping that mixes features within the residual stream
+        x_res_mixed = einsum(H_res, x_stream, 'b s n1 n2, b s n2 c -> b s n1 c')  # (b, s, n, C)
+
+        # Step 5: x_{l+1} = H_res * x_l + (H_post)^T * F(...)
+        x_stream_new = x_res_mixed + sublayer_stream  # (b, s, n, C)
+
+        return x_stream_new
+
     def forward(self, x: torch.Tensor, token_positions: torch.Tensor) -> torch.Tensor:
         """
-        x: input, shape (batch_size, seq_len, C) - original dimension
-        Returns: output, shape (batch_size, seq_len, C)
+        Forward pass for mHC Transformer block.
+
+        Args:
+            x: input, shape (batch_size, seq_len, C) - layer input dimension
+            token_positions: position indices for RoPE
+
+        Returns:
+            output, shape (batch_size, seq_len, C)
         """
         batch_size, seq_len, C = x.shape
         assert C == self.d_model, f"Input dimension {C} should match d_model {self.d_model}"
 
-        # ==== 1. Expand input to n*C dimensional residual stream ====
-        # Expand by repetition: x_stream (batch, seq_len, n*C)
-        x_stream = repeat(x, 'b s c -> b s (n c)', n=self.n)
+        # ==== Step 1: Expand input to n*C dimensional residual stream ====
+        # Paper Section 3: "x_l = (x_{l,0}^T, ..., x_{l,n-1}^T)^T ∈ R^{n×C}"
+        # Initial expansion: replicate input across n streams
+        x_stream = repeat(x, 'b s c -> b s n c', n=self.n)  # (b, s, n, C)
 
-        # ==== 2. Flatten to compute mapping coefficients ====
-        # To compute H_pre, H_post, H_res, merge batch and seq_len
-        x_flat = rearrange(x_stream, 'b s d -> (b s) d')  # (b*s, n*C)
+        # ==== Step 2: Attention sub-layer with mHC ====
+        # Pre-norm: Apply RMSNorm before attention
+        # We need to apply norm to each stream independently
+        x_stream_normed = torch.stack([
+            self.ln1(x_stream[:, :, i, :]) for i in range(self.n)
+        ], dim=2)  # (b, s, n, C)
 
-        # Compute three mappings
-        H_pre, H_post, H_res = self.mhc(x_flat)  # Each shape: (b*s, n) or (b*s, n, n)
+        # Compute mHC mappings for attention
+        H_pre_attn, H_post_attn, H_res_attn = self._compute_mhc_mappings(x_stream_normed, self.mhc_attn)
 
-        # Restore batch and seq_len dimensions
-        H_pre = rearrange(H_pre, '(b s) n -> b s n', b=batch_size, s=seq_len)
-        H_post = rearrange(H_post, '(b s) n -> b s n', b=batch_size, s=seq_len)
-        H_res = rearrange(H_res, '(b s) n1 n2 -> b s n1 n2',
-                         b=batch_size, s=seq_len, n1=self.n, n2=self.n)
+        # Apply attention with mHC
+        # Note: attention applies its own RoPE internally
+        def attn_fn(x_in):
+            return self.self_attention(x_in, token_positions)
 
-        # Normalize H_pre for proper weighted aggregation (sum to 1)
-        # This ensures the aggregated input has similar scale to the original
-        H_pre_normalized = H_pre / (H_pre.sum(dim=-1, keepdim=True) + 1e-6)
+        x_stream = self._apply_mhc_sublayer(x_stream, H_pre_attn, H_post_attn, H_res_attn, attn_fn)
 
-        # ==== 3. Apply H_pre to aggregate to C-dimensional input ====
-        # Split x_stream into n groups, each C dimensions
-        x_split = rearrange(x_stream, 'b s (n c) -> b s n c', n=self.n, c=C)
+        # ==== Step 3: FFN sub-layer with mHC ====
+        # Pre-norm: Apply RMSNorm before FFN
+        x_stream_normed = torch.stack([
+            self.ln2(x_stream[:, :, i, :]) for i in range(self.n)
+        ], dim=2)  # (b, s, n, C)
 
-        # Use H_pre_normalized weighted aggregation: x_attn_input (b, s, C)
-        x_attn_input = einsum(H_pre_normalized, x_split, 'b s n, b s n c -> b s c')
+        # Compute mHC mappings for FFN (independent from attention)
+        H_pre_ffn, H_post_ffn, H_res_ffn = self._compute_mhc_mappings(x_stream_normed, self.mhc_ffn)
 
-        # ==== 4. Pass through attention layer ====
-        attn_output = self.self_attention(x_attn_input, token_positions)
-        # attn_output: (b, s, C)
+        # Apply FFN with mHC
+        x_stream = self._apply_mhc_sublayer(x_stream, H_pre_ffn, H_post_ffn, H_res_ffn, self.ffn)
 
-        # ==== 5. Apply H_post to project attention output back to stream ====
-        # First expand attn_output to n copies, then weight with H_post
-        attn_output_expanded = repeat(attn_output, 'b s c -> b s n c', n=self.n)
-
-        # H_post = 2*sigmoid(...), range [0,2]
-        # Scale by 0.75 for balanced residual connection strength
-        H_post_scaled = H_post * 0.75
-
-        # Apply H_post as weights
-        attn_stream = attn_output_expanded * H_post_scaled.unsqueeze(-1)
-
-        # ==== 6. Apply H_res for intra-stream mixing ====
-        # Reshape x_stream to (b, s, n, C) for matrix multiplication
-        x_stream_reshaped = rearrange(x_stream, 'b s (n c) -> b s n c', n=self.n, c=C)
-
-        # H_res: (b, s, n, n) mixes n streams
-        x_stream_mixed = einsum(H_res, x_stream_reshaped, 'b s n1 n2, b s n2 c -> b s n1 c')
-
-        # Add projected attention output (with residual connection)
-        x_stream_updated = x_stream_mixed + attn_stream
-
-        # ==== 7. Pass through FFN ====
-        x_ffn_input = einsum(H_pre_normalized, x_stream_updated, 'b s n, b s n c -> b s c')
-        ffn_output = self.ffn(x_ffn_input)
-
-        # ==== 8. Apply H_post again to project back to stream ====
-        ffn_output_expanded = repeat(ffn_output, 'b s c -> b s n c', n=self.n)
-        ffn_stream = ffn_output_expanded * H_post_scaled.unsqueeze(-1)
-
-        # ==== 9. Final residual stream update ====
-        x_stream_final = x_stream_updated + ffn_stream
-
-        # ==== 10. Aggregate back to C-dimensional output ====
-        x_output = einsum(H_pre_normalized, x_stream_final, 'b s n, b s n c -> b s c')
+        # ==== Step 4: Aggregate n*C stream back to C dimension for output ====
+        # Mean aggregation across streams for final output
+        # This maintains compatibility with standard Transformer interface
+        x_output = x_stream.mean(dim=2)  # (b, s, C)
 
         # Apply dropout
         x_output = self.dropout(x_output)
@@ -458,6 +552,15 @@ class mHCTransformerBlock(nn.Module):
 class mHCTransformerLM(nn.Module):
     """
     Complete mHC Transformer Language Model
+
+    Paper Section 5: "mHC exhibits exceptional stability and scalability
+    while maintaining the performance advantages of HC."
+
+    Architecture:
+    - Token embedding: vocab_size -> d_model
+    - N mHC Transformer blocks (each with Attention + FFN)
+    - Final RMSNorm
+    - Output projection: d_model -> vocab_size
     """
     def __init__(
         self,
@@ -467,7 +570,7 @@ class mHCTransformerLM(nn.Module):
         d_ff: int,
         num_layers: int,
         context_length: int,
-        expansion_rate: int = 2,  # Using 2 for small models
+        expansion_rate: int = 2,  # n from paper, using 2 for small models (paper uses 4)
         theta: float = 10000.0,
         dropout: float = 0.1,
         device: Optional[torch.device] = None,
@@ -482,16 +585,17 @@ class mHCTransformerLM(nn.Module):
         self.context_length = context_length
         self.expansion_rate = expansion_rate
         self.theta = theta
-        
-        # token embedding unchanged, outputs d_model dimensions
+
+        # Token embedding: outputs d_model dimensions
         self.token_embedding = Embedding(
             vocab_size,
             d_model,
             device=device,
             dtype=dtype
         )
-        
-        # Use mHC Transformer Blocks
+
+        # Stack of mHC Transformer Blocks
+        # Each block contains Attention and FFN sub-layers with independent mHC
         self.blocks = nn.ModuleList([
             mHCTransformerBlock(
                 d_model=d_model,
@@ -506,37 +610,57 @@ class mHCTransformerLM(nn.Module):
             )
             for _ in range(num_layers)
         ])
-        
+
+        # Final layer norm
         self.ln_final = RMSNorm(d_model, device=device, dtype=dtype)
+
+        # Output projection (language model head)
         self.output_projection = Linear(
             d_model,
             vocab_size,
             device=device,
             dtype=dtype
         )
-        
+
     def forward(
         self,
         input_ids: torch.Tensor,
         token_positions: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
-        # token embedding: (batch, seq_len) -> (batch, seq_len, d_model)
+        """
+        Forward pass for mHC Transformer Language Model.
+
+        Args:
+            input_ids: token ids, shape (batch_size, seq_len)
+            token_positions: position indices for RoPE, shape (batch_size, seq_len)
+
+        Returns:
+            logits: shape (batch_size, seq_len, vocab_size)
+        """
+        # Token embedding: (batch, seq_len) -> (batch, seq_len, d_model)
         x = self.token_embedding(input_ids)
-        
-        # If positions not provided, use default positions
+
+        # If positions not provided, use default sequential positions
         if token_positions is None:
             seq_len = input_ids.shape[1]
             token_positions = torch.arange(seq_len, device=input_ids.device)
             token_positions = token_positions.unsqueeze(0).expand(input_ids.shape[0], -1)
-        
+
         # Pass through mHC blocks
         for block in self.blocks:
             x = block(x, token_positions)
-            
+
+        # Final layer norm
         x = self.ln_final(x)
+
+        # Output projection to vocabulary
         logits = self.output_projection(x)
-        
+
         return logits
+
+    def get_num_params(self) -> int:
+        """Return the number of parameters in the model."""
+        return sum(p.numel() for p in self.parameters())
 
 
 # ========== For comparison, also keep original Transformer import ==========
