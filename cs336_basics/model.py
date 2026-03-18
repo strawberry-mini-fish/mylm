@@ -212,11 +212,13 @@ class TransformerBlock(nn.Module):
 
         self.norm1=RMSNorm(d_model,device=device,dtype=dtype)
         self.self_attention=CasualMultiheadSelfAttention(d_model=d_model,num_heads=num_heads,max_seq_len=max_seq_len,theta=theta,device=device,dtype=dtype)
-        
+
 
         self.norm2=RMSNorm(d_model,device=device,dtype=dtype)
         self.ffn=SwiGLU(d_model=d_model,d_ff=d_ff,device=device,dtype=dtype)
-        
+
+        # Dropout for fair comparison with mHC model
+        self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
 
     def forward(self,x:torch.Tensor,token_positions:torch.Tensor)->torch.Tensor:
         norm_x=self.norm1(x)
@@ -227,6 +229,7 @@ class TransformerBlock(nn.Module):
         ffn_output=self.ffn(norm_x)
         x=x+ffn_output
 
+        x = self.dropout(x)
         return x
 
 class TransformerLM(nn.Module):
@@ -239,6 +242,7 @@ class TransformerLM(nn.Module):
             num_layers:int,
             context_length:int,
             theta:float=10000.0,
+            dropout:float=0.1,
             device: Optional[torch.device] = None,
             dtype: Optional[torch.dtype] = None
     ):
@@ -250,6 +254,7 @@ class TransformerLM(nn.Module):
         self.num_layers = num_layers
         self.context_length = context_length
         self.theta = theta
+        self.dropout = dropout
         self.token_embedding=Embedding(
             vocab_size,
             d_model,
@@ -261,8 +266,9 @@ class TransformerLM(nn.Module):
                 d_model=d_model,
                 num_heads=num_heads,
                 d_ff=d_ff,
-                max_seq_len=context_length,  
+                max_seq_len=context_length,
                 theta=theta,
+                dropout=dropout,
                 device=device,
                 dtype=dtype
             )
@@ -270,7 +276,7 @@ class TransformerLM(nn.Module):
         ])
         self.ln_final=RMSNorm(d_model,device=device,dtype=dtype)
         self.output_projection = Linear(
-            d_model, 
+            d_model,
             vocab_size,
             device=device,
             dtype=dtype
