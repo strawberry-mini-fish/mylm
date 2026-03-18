@@ -286,9 +286,23 @@ class ManifoldHyperConnection(nn.Module):
 
         # Learnable biases b (static mappings)
         # Paper Eq. (7): b_pre, b_post ∈ R^{1×n}, b_res ∈ R^{n×n}
-        self.b_pre = nn.Parameter(torch.zeros((1, self.n), device=device, dtype=dtype))
+        # Initialize for identity-like behavior at initialization:
+        # - b_pre: sigmoid(b_pre) = 1/n for proper aggregation
+        # - b_post: 2*sigmoid(b_post) = 1 for proper expansion
+        # - b_res: large diagonal to make Sinkhorn-Knopp output near identity
+
+        # b_pre: sigmoid(b_pre) = 1/n -> b_pre = log(1/(n-1))
+        b_pre_val = math.log(1.0 / (self.n - 1)) if self.n > 1 else 0.0
+        self.b_pre = nn.Parameter(torch.full((1, self.n), b_pre_val, device=device, dtype=dtype))
+
+        # b_post: 2*sigmoid(b_post) = 1 -> sigmoid(b_post) = 0.5 -> b_post = 0
         self.b_post = nn.Parameter(torch.zeros((1, self.n), device=device, dtype=dtype))
-        self.b_res = nn.Parameter(torch.zeros((self.n, self.n), device=device, dtype=dtype))
+
+        # b_res: initialize with large diagonal for identity-like behavior
+        # After Sinkhorn-Knopp, exp(large_diag + small_off_diag) will be near identity
+        b_res = torch.eye(self.n, device=device, dtype=dtype) * 5.0  # Large diagonal
+        b_res = b_res - 5.0  # Shift so diagonal is 0, off-diagonal is -5
+        self.b_res = nn.Parameter(b_res)
 
         # Initialize phi matrices
         self._init_weights()
@@ -542,8 +556,8 @@ class mHCTransformerBlock(nn.Module):
         x_stream = self._apply_mhc_sublayer(x_stream, x_stream_normed, H_pre_ffn, H_post_ffn, H_res_ffn, self.ffn)
 
         # ==== Step 4: Aggregate n*C stream back to C dimension for output ====
-        # Sum aggregation (H_res already provides proper scaling)
-        x_output = x_stream.sum(dim=2)  # (b, s, C)
+        # Mean aggregation to match standard residual connection scale
+        x_output = x_stream.mean(dim=2)  # (b, s, C)
 
         # Apply dropout
         x_output = self.dropout(x_output)
