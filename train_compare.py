@@ -15,9 +15,16 @@ from typing import Optional
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.utils.tensorboard import SummaryWriter
 from datasets import load_dataset
 from transformers import AutoTokenizer
+
+# Try to import TensorBoard, make it optional
+try:
+    from torch.utils.tensorboard import SummaryWriter
+    HAS_TENSORBOARD = True
+except ImportError:
+    HAS_TENSORBOARD = False
+    logger.warning("TensorBoard not installed, will use file logging only")
 
 from cs336_basics.model import TransformerLM
 from cs336_basics.mhc_model import mHCTransformerLM
@@ -179,8 +186,9 @@ def train_model(args, model_type, train_data, tokenizer, writer, global_step_off
 
         # Logging
         global_step = global_step_offset + iter
-        writer.add_scalar(f"loss/{model_type}", loss.item(), global_step)
-        writer.add_scalar(f"lr/{model_type}", current_lr, global_step)
+        if writer is not None:
+            writer.add_scalar(f"loss/{model_type}", loss.item(), global_step)
+            writer.add_scalar(f"lr/{model_type}", current_lr, global_step)
 
         if iter % args.log_interval == 0:
             avg_loss = np.mean(train_losses[-args.log_interval:])
@@ -189,7 +197,8 @@ def train_model(args, model_type, train_data, tokenizer, writer, global_step_off
         # Evaluation
         if iter % args.eval_interval == 0 and iter > 0:
             eval_loss = evaluate(model, train_data, args.batch_size, args.context_length, device, model_type)
-            writer.add_scalar(f"eval_loss/{model_type}", eval_loss, global_step)
+            if writer is not None:
+                writer.add_scalar(f"eval_loss/{model_type}", eval_loss, global_step)
             logger.info(f"[{model_type}] eval loss: {eval_loss:.4f}")
 
     # Save final model
@@ -214,9 +223,13 @@ def main():
     device = torch.device(args.device)
     logger.info(f"Using device: {device}")
 
-    # TensorBoard writer
-    writer = SummaryWriter(args.tensorboard_dir)
-    logger.info(f"TensorBoard logs: {args.tensorboard_dir}")
+    # TensorBoard writer (optional)
+    if HAS_TENSORBOARD:
+        writer = SummaryWriter(args.tensorboard_dir)
+        logger.info(f"TensorBoard logs: {args.tensorboard_dir}")
+    else:
+        writer = None
+        logger.info("TensorBoard not available, using file logging")
 
     # Load tokenizer
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_name)
@@ -234,10 +247,12 @@ def main():
     # Train mHC model
     global_step = train_model(args, "mhc", train_data, tokenizer, writer, global_step, device)
 
-    writer.close()
+    if writer is not None:
+        writer.close()
     logger.info("=" * 60)
     logger.info("Comparison training complete!")
-    logger.info(f"View TensorBoard: tensorboard --logdir {args.tensorboard_dir}")
+    if HAS_TENSORBOARD:
+        logger.info(f"View TensorBoard: tensorboard --logdir {args.tensorboard_dir}")
     logger.info("=" * 60)
 
 
