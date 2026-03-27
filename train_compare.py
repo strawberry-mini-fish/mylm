@@ -55,7 +55,7 @@ def parse_args():
     parser.add_argument("--max_iters", type=int, default=10000, help="Total iterations")
     parser.add_argument("--switch_interval", type=int, default=1000, help="Switch models every N iterations")
     parser.add_argument("--learning_rate", type=float, default=3e-4)
-    parser.add_argument("--mhc_learning_rate", type=float, default=1e-4, help="Learning rate for mHC")
+    parser.add_argument("--mhc_learning_rate", type=float, default=3e-4, help="Learning rate for mHC (same as original by default)")
     parser.add_argument("--warmup_iters", type=int, default=1000)
     parser.add_argument("--log_interval", type=int, default=50)
     parser.add_argument("--grad_clip", type=float, default=1.0)
@@ -118,7 +118,7 @@ def create_model(args, model_type, device):
 
 
 def train_step(model, optimizer, train_data, args, device, model_type):
-    """Single training step, returns loss."""
+    """Single training step, returns loss and gradient norm."""
     X, Y = get_batch(train_data, args.batch_size, args.context_length, device)
 
     if model_type == "mhc":
@@ -132,11 +132,20 @@ def train_step(model, optimizer, train_data, args, device, model_type):
 
     optimizer.zero_grad()
     loss.backward()
+
+    # Calculate gradient norm before clipping
+    total_norm = 0.0
+    for p in model.parameters():
+        if p.grad is not None:
+            param_norm = p.grad.data.norm(2)
+            total_norm += param_norm.item() ** 2
+    grad_norm = total_norm ** 0.5
+
     if args.grad_clip > 0:
         gradient_clipping(model.parameters(), args.grad_clip)
     optimizer.step()
 
-    return loss.item()
+    return loss.item(), grad_norm
 
 
 def main():
@@ -150,12 +159,17 @@ def main():
     device = torch.device(args.device)
     logger.info(f"Using device: {device}")
 
-    # TensorBoard writer (optional)
+    # TensorBoard writers for each model (optional)
+    # Use separate directories so TensorBoard can show them on the same graph
     if HAS_TENSORBOARD:
-        writer = SummaryWriter(args.tensorboard_dir)
+        writer_original = SummaryWriter(os.path.join(args.tensorboard_dir, "original"))
+        writer_mhc = SummaryWriter(os.path.join(args.tensorboard_dir, "mhc"))
         logger.info(f"TensorBoard logs: {args.tensorboard_dir}")
+        logger.info("  - original: runs/compare/original")
+        logger.info("  - mhc: runs/compare/mhc")
     else:
-        writer = None
+        writer_original = None
+        writer_mhc = None
         logger.info("TensorBoard not available, using file logging")
 
     # CSV log file (always available)
@@ -163,7 +177,7 @@ def main():
     os.makedirs(args.tensorboard_dir, exist_ok=True)
     csv_file = open(csv_log_path, 'w', newline='')
     csv_writer = csv.writer(csv_file)
-    csv_writer.writerow(['step', 'model', 'loss', 'lr'])
+    csv_writer.writerow(['step', 'model', 'loss', 'lr', 'grad_norm'])
     logger.info(f"CSV logs: {csv_log_path}")
 
     # Load tokenizer
@@ -228,29 +242,34 @@ def main():
             model_iter = iter_mhc
 
         # Compute learning rate
-        current_lr = cosine_lr_schedule(model_iter, lr, args.warmup_iters, args.max_iters, lr * 0.1)
+        current_lr = cosine_lr_schedule(model_iter, lr, lr * 0.1, args.warmup_iters, args.max_iters)
         for param_group in optimizer.param_groups:
             param_group['lr'] = current_lr
 
         # Training step
         model.train()
-        loss = train_step(model, optimizer, train_data, args, device, current_model)
+        loss, grad_norm = train_step(model, optimizer, train_data, args, device, current_model)
 
         # Update counters
         if current_model == "original":
             iter_original += 1
             losses_original.append(loss)
+            current_iter = iter_original
+            writer = writer_original
         else:
             iter_mhc += 1
             losses_mhc.append(loss)
+            current_iter = iter_mhc
+            writer = writer_mhc
 
-        # Logging
+        # Logging to TensorBoard
         if writer is not None:
-            writer.add_scalar(f"loss/{current_model}", loss, global_step)
-            writer.add_scalar(f"lr/{current_model}", current_lr, global_step)
+            writer.add_scalar("loss", loss, current_iter)
+            writer.add_scalar("grad_norm", grad_norm, current_iter)
+            writer.add_scalar("lr", current_lr, current_iter)
 
         # CSV logging (always)
-        csv_writer.writerow([global_step, current_model, loss, current_lr])
+        csv_writer.writerow([global_step, current_model, loss, current_lr, grad_norm])
 
         if global_step % args.log_interval == 0:
             logger.info(f"[{current_model:8s}] step {global_step:5d} | "
@@ -282,8 +301,10 @@ def main():
     logger.info(f"Original model final loss: {np.mean(losses_original[-100:]):.4f}")
     logger.info(f"mHC model final loss: {np.mean(losses_mhc[-100:]):.4f}")
 
-    if writer is not None:
-        writer.close()
+    if writer_original is not None:
+        writer_original.close()
+    if writer_mhc is not None:
+        writer_mhc.close()
 
     csv_file.close()
     logger.info(f"CSV log saved to: {csv_log_path}")

@@ -29,12 +29,16 @@ LOG_INTERVAL = 100
 SAVE_INTERVAL = 5000
 
 # mHC specific hyperparameters
-MHC_LEARNING_RATE = 1e-4
+MHC_LEARNING_RATE = 3e-4
 MHC_WARMUP_ITERS = 4000
 MHC_EXPANSION_RATE = 4
 
 # Tokenization settings
 MAX_SAMPLES = 100000
+
+# GPU settings (override with: make train CUDA_VISIBLE_DEVICES=0,1)
+CUDA_VISIBLE_DEVICES ?= 0
+DEVICE = cuda
 
 # ========== Tokenization ==========
 
@@ -66,8 +70,8 @@ tokenize-full:
 # Train original Transformer
 train:
 	@mkdir -p $(OUTPUT_DIR_ORIGINAL)
-	@echo "Starting original Transformer training..."
-	$(PYTHON) $(TRAIN_SCRIPT) \
+	@echo "Starting original Transformer training on GPU $(CUDA_VISIBLE_DEVICES)..."
+	CUDA_VISIBLE_DEVICES=$(CUDA_VISIBLE_DEVICES) $(PYTHON) $(TRAIN_SCRIPT) \
 		--model_type original \
 		--vocab_size $(VOCAB_SIZE) \
 		--tokenizer_name $(TOKENIZER) \
@@ -83,13 +87,14 @@ train:
 		--log_interval $(LOG_INTERVAL) \
 		--save_interval $(SAVE_INTERVAL) \
 		--output_dir $(OUTPUT_DIR_ORIGINAL) \
-		--max_samples $(MAX_SAMPLES)
+		--max_samples $(MAX_SAMPLES) \
+		--device $(DEVICE)
 
 # Train mHC Transformer
 train-mhc:
 	@mkdir -p $(OUTPUT_DIR_MHC)
-	@echo "Starting mHC Transformer training..."
-	$(PYTHON) $(TRAIN_SCRIPT) \
+	@echo "Starting mHC Transformer training on GPU $(CUDA_VISIBLE_DEVICES)..."
+	CUDA_VISIBLE_DEVICES=$(CUDA_VISIBLE_DEVICES) $(PYTHON) $(TRAIN_SCRIPT) \
 		--model_type mhc \
 		--vocab_size $(VOCAB_SIZE) \
 		--tokenizer_name $(TOKENIZER) \
@@ -107,7 +112,8 @@ train-mhc:
 		--output_dir $(OUTPUT_DIR_MHC) \
 		--max_samples $(MAX_SAMPLES) \
 		--expansion_rate $(MHC_EXPANSION_RATE) \
-		--grad_clip 1.0
+		--grad_clip 1.0 \
+		--device $(DEVICE)
 
 # Train both models for comparison
 train-all: train train-mhc
@@ -117,8 +123,8 @@ train-all: train train-mhc
 
 # Train both models sequentially with TensorBoard logging for comparison
 train-compare:
-	@echo "Training both models alternately with TensorBoard logging..."
-	$(PYTHON) ./train_compare.py \
+	@echo "Training both models alternately on GPU $(CUDA_VISIBLE_DEVICES)..."
+	CUDA_VISIBLE_DEVICES=$(CUDA_VISIBLE_DEVICES) $(PYTHON) ./train_compare.py \
 		--vocab_size $(VOCAB_SIZE) \
 		--tokenizer_name $(TOKENIZER) \
 		--n_layer $(N_LAYER) \
@@ -135,7 +141,8 @@ train-compare:
 		--expansion_rate $(MHC_EXPANSION_RATE) \
 		--max_samples $(MAX_SAMPLES) \
 		--output_dir ./checkpoints \
-		--tensorboard_dir ./runs/compare
+		--tensorboard_dir ./runs/compare \
+		--device $(DEVICE)
 	@echo "Training complete! View TensorBoard: tensorboard --logdir ./runs/compare"
 
 # ========== Cleanup ==========

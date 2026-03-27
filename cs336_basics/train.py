@@ -398,7 +398,7 @@ def main():
 
     for iter in range(start_iter, args.max_iters):
         # Compute learning rate
-        lr = cosine_lr_schedule(iter, args.learning_rate, args.warmup_iters, args.max_iters, args.learning_rate * 0.1)
+        lr = cosine_lr_schedule(iter, args.learning_rate, args.learning_rate * 0.1, args.warmup_iters, args.max_iters)
         for param_group in optimizer.param_groups:
             param_group['lr'] = lr
 

@@ -364,8 +364,9 @@ class mHCTransformerBlock(nn.Module):
 
     Paper Eq. (3): x_{l+1} = H_res * x_l + (H_post)^T * F(H_pre * x_l, W_l)
 
-    The residual stream dimension is n*C, maintained across layers.
-    For interface with standard Transformer, we expand C -> n*C at input and aggregate n*C -> C at output.
+    The residual stream dimension is n*C, maintained across ALL layers in the network.
+    Input and output are both n*C dimensional - the expansion/aggregation happens
+    at the network level (in mHCTransformerLM), not per block.
     """
     def __init__(
         self,
@@ -502,26 +503,22 @@ class mHCTransformerBlock(nn.Module):
 
         return x_stream_new
 
-    def forward(self, x: torch.Tensor, token_positions: torch.Tensor) -> torch.Tensor:
+    def forward(self, x_stream: torch.Tensor, token_positions: torch.Tensor) -> torch.Tensor:
         """
         Forward pass for mHC Transformer block.
 
         Args:
-            x: input, shape (batch_size, seq_len, C) - layer input dimension
+            x_stream: residual stream, shape (batch_size, seq_len, n, C) - already expanded
             token_positions: position indices for RoPE
 
         Returns:
-            output, shape (batch_size, seq_len, C)
+            output stream, shape (batch_size, seq_len, n, C) - maintains n*C dimension
         """
-        batch_size, seq_len, C = x.shape
+        batch_size, seq_len, n, C = x_stream.shape
         assert C == self.d_model, f"Input dimension {C} should match d_model {self.d_model}"
+        assert n == self.n, f"Stream count {n} should match expansion_rate {self.n}"
 
-        # ==== Step 1: Expand input to n*C dimensional residual stream ====
-        # Paper Section 3: "x_l = (x_{l,0}^T, ..., x_{l,n-1}^T)^T ∈ R^{n×C}"
-        # Initial expansion: replicate input across n streams
-        x_stream = repeat(x, 'b s c -> b s n c', n=self.n)  # (b, s, n, C)
-
-        # ==== Step 2: Attention sub-layer with mHC ====
+        # ==== Step 1: Attention sub-layer with mHC ====
         # Pre-norm: Apply RMSNorm before attention
         # We need to apply norm to each stream independently
         x_stream_normed = torch.stack([
@@ -538,7 +535,7 @@ class mHCTransformerBlock(nn.Module):
 
         x_stream = self._apply_mhc_sublayer(x_stream, x_stream_normed, H_pre_attn, H_post_attn, H_res_attn, attn_fn)
 
-        # ==== Step 3: FFN sub-layer with mHC ====
+        # ==== Step 2: FFN sub-layer with mHC ====
         # Pre-norm: Apply RMSNorm before FFN
         x_stream_normed = torch.stack([
             self.ln2(x_stream[:, :, i, :]) for i in range(self.n)
@@ -550,14 +547,10 @@ class mHCTransformerBlock(nn.Module):
         # Apply FFN with mHC
         x_stream = self._apply_mhc_sublayer(x_stream, x_stream_normed, H_pre_ffn, H_post_ffn, H_res_ffn, self.ffn)
 
-        # ==== Step 4: Aggregate n*C stream back to C dimension for output ====
-        # Mean aggregation to match standard residual connection scale
-        x_output = x_stream.mean(dim=2)  # (b, s, C)
-
         # Apply dropout
-        x_output = self.dropout(x_output)
+        x_stream = self.dropout(x_stream)
 
-        return x_output
+        return x_stream
 
 
 class mHCTransformerLM(nn.Module):
@@ -569,9 +562,16 @@ class mHCTransformerLM(nn.Module):
 
     Architecture:
     - Token embedding: vocab_size -> d_model
-    - N mHC Transformer blocks (each with Attention + FFN)
+    - Expand to n*C residual stream (happens once at network input)
+    - N mHC Transformer blocks (each maintaining n*C stream dimension)
+    - Aggregate n*C stream back to C dimension (happens once at network output)
     - Final RMSNorm
     - Output projection: d_model -> vocab_size
+
+    Key difference from per-block expansion:
+    The residual stream is expanded ONCE at the beginning and maintains n*C dimension
+    through ALL layers, then aggregated back to C at the end. This follows the paper's
+    design where the expanded residual stream provides continuous information flow.
     """
     def __init__(
         self,
@@ -657,9 +657,17 @@ class mHCTransformerLM(nn.Module):
             token_positions = torch.arange(seq_len, device=input_ids.device)
             token_positions = token_positions.unsqueeze(0).expand(input_ids.shape[0], -1)
 
-        # Pass through mHC blocks
+        # ==== Expand to n*C residual stream (once at the beginning) ====
+        # Paper Section 3: "x_l = (x_{l,0}^T, ..., x_{l,n-1}^T)^T ∈ R^{n×C}"
+        x_stream = repeat(x, 'b s c -> b s n c', n=self.expansion_rate)  # (b, s, n, C)
+
+        # Pass through mHC blocks (stream dimension maintained across layers)
         for block in self.blocks:
-            x = block(x, token_positions)
+            x_stream = block(x_stream, token_positions)
+
+        # ==== Aggregate n*C stream back to C dimension ====
+        # Mean aggregation to match standard residual connection scale
+        x = x_stream.mean(dim=2)  # (b, s, C)
 
         # Final layer norm
         x = self.ln_final(x)
